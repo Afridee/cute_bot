@@ -18,6 +18,7 @@ import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:record/record.dart';
 
 import '../shared/adpcm.dart';
+import '../shared/audio_transport.dart';
 import '../shared/ble_protocol.dart';
 import '../shared/log.dart';
 
@@ -95,6 +96,11 @@ final class SimulatorController extends ChangeNotifier {
   final ImaAdpcmEncoder _micEncoder = ImaAdpcmEncoder();
   final BytesBuilder _micPending = BytesBuilder(copy: true);
   bool _micUtteranceStarted = false;
+
+  /// Checksum of the ADPCM payload sent this utterance. Shown on screen so
+  /// the M1 human test can compare it against the companion's received
+  /// checksum: equal values prove byte-identical delivery.
+  final Fnv32 _micChecksum = Fnv32();
 
   bool _playbackReady = false;
   bool _started = false;
@@ -437,6 +443,7 @@ final class SimulatorController extends ChangeNotifier {
     micFramesSent = 0;
     _micPending.clear();
     _micEncoder.reset();
+    _micChecksum.reset();
     _micUtteranceStarted = false;
     _audioOutSeq.reset();
     notifyListeners();
@@ -499,14 +506,18 @@ final class SimulatorController extends ChangeNotifier {
     if (notifyPeers && _micUtteranceStarted) {
       // Empty end-of-stream frame closes the utterance (protocol contract).
       _sendAudioFrame(Uint8List(0), isStart: false, isEnd: true);
+      _logActivity(
+          'Utterance sent: $micFramesSent frames, crc ${_micChecksum.hex}');
     }
     _setBotState(BotState.idle);
-    Log.i(_tag, 'mic streaming stopped, $micFramesSent frames sent');
+    Log.i(_tag,
+        'mic streaming stopped, $micFramesSent frames sent, crc ${_micChecksum.hex}');
     notifyListeners();
   }
 
   void _sendAudioFrame(Uint8List block,
       {required bool isStart, required bool isEnd}) {
+    _micChecksum.add(block);
     final frame = AudioChunkMessage(
       sequence: _audioOutSeq.next(),
       adpcmBlock: block,

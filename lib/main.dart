@@ -56,7 +56,7 @@ class ModeSelectPage extends StatelessWidget {
               _ModeButton(
                 icon: Icons.phone_android,
                 title: 'Companion',
-                subtitle: 'The brain: connects to the bot (central) — M1',
+                subtitle: 'The brain: connects to the bot (central)',
                 onTap: () => Navigator.of(context).push(
                   MaterialPageRoute(builder: (_) => const CompanionPage()),
                 ),

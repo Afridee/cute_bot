@@ -4,7 +4,8 @@ Flutter companion app for a small desk robot (mic + speaker + BLE; ESP32 later).
 All intelligence runs on the phone, fully offline. The bot is ears, a mouth,
 and a face.
 
-**Milestone status: M0 complete (agent bar). Awaiting the M0 human-bar test.**
+**Milestone status: M1 complete (agent bar). Awaiting the M1 human-bar test —
+the bandwidth gate. See `Docs/m1-testing-guide.md`.**
 
 ## Layout
 
@@ -12,9 +13,10 @@ and a face.
 |---|---|
 | `lib/shared/ble_protocol.dart` | The BLE contract: UUIDs, frame header, message types, audio wire format, pairing stance. Dependency-free Dart; the ESP32 firmware ports from it. Control plane frozen after M0; audio plane provisional until the M1 bandwidth gate. |
 | `lib/shared/adpcm.dart` | IMA ADPCM codec (4:1), self-contained blocks. Dependency-free, firmware-portable. |
+| `lib/shared/audio_transport.dart` | M1 framing/reassembly: MTU-aware chunker (sender) and loss/duplicate/reorder-tolerant reassembler (receiver), plus the FNV-1a delivery checksum. Dependency-free, firmware-portable. |
 | `lib/shared/log.dart` | Single logging channel with levels. `adb logcat | grep CuteBot`. |
 | `lib/bot_simulator/` | Peripheral (GATT server) mode: a second Android phone standing in for the ESP32. |
-| `lib/companion/` | Central mode — the actual app. Placeholder until M1. |
+| `lib/companion/` | Central mode — the actual app. M1: `bot_link.dart` (scan / auto-connect / MTU 517 / reconnect backoff / prioritized writes) + debug panel with bandwidth-gate instrumentation. |
 
 ## Toolchain
 
@@ -42,6 +44,21 @@ and a face.
 - Endpointing: push-to-talk; start/end-of-utterance flags in the frame header.
 - Pairing: **open link** for the simulator phase; moves to bonded-only +
   encrypted writes before real hardware. Recorded in `ble_protocol.dart`.
+
+## M1 in one paragraph
+
+The companion scans for the bot service UUID, connects to the first match,
+requests MTU 517 immediately (and adapts frame size if it gets less),
+subscribes to audio + telemetry, and reconnects on drop with exponential
+backoff (0.5 s doubling to 30 s; rescan rather than reuse the old handle,
+because Android peripherals rotate their random address). Outbound writes go
+through a single prioritized queue: control commands (write-with-response)
+always jump ahead of audio frames (write-without-response). Incoming
+utterances are reassembled with silence substituted for lost frames, played
+live, and scored for the bandwidth gate: ×-real-time rate, kbps, worst
+inter-frame gap, loss/dup/stale counts, and an FNV-1a checksum the simulator
+also displays for the byte-identical check. `Docs/m1-testing-guide.md` walks
+the two-phone test.
 
 ## Running the M0 human-bar test
 
