@@ -46,6 +46,7 @@ dependencies:
 
   # Simulator real-time raw PCM16 playback (approved in M0).
   flutter_pcm_sound: ^3.3.3
+  flutter_foreground_task: ^10.0.0
 
 dev_dependencies:
   flutter_test:

@@ -7,11 +7,15 @@
 // State management: plain ChangeNotifier throughout (brief rule 4).
 
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'bot_simulator/simulator_page.dart';
 import 'companion/companion_page.dart';
 
 void main() {
+  // Receive port for foreground-service -> UI messages (M2). Must be set up
+  // before runApp so an already-running service reattaches on app relaunch.
+  FlutterForegroundTask.initCommunicationPort();
   runApp(const CuteBotApp());
 }
 

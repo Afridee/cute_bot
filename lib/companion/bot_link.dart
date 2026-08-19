@@ -10,7 +10,8 @@
 //   audio frames ("set_led must not sit behind a queue of audio chunks")
 //
 // Failure paths handled: Bluetooth off/on, permission denied, connect
-// timeout, characteristic discovery mismatch, writes failing mid-flight.
+// timeout, GATT establish failure (Android status 62), characteristic
+// discovery mismatch, writes failing mid-flight.
 
 import 'dart:async';
 import 'dart:collection';
@@ -22,6 +23,44 @@ import '../shared/ble_protocol.dart';
 import '../shared/log.dart';
 
 const String _tag = 'BotLink';
+
+/// Short UI string for a BLE plugin/platform failure. The raw exception
+/// is often a Java stack wrapped in a platform exception; dumping that
+/// on screen looks like a crash.
+String bleFailureMessage(String action, Object error) {
+  final status = bleGattStatus(error);
+  const retry = 'Retrying…';
+  return switch (status) {
+    // 0x08 GATT_CONN_TIMEOUT, 0x3E GATT_CONN_FAIL_ESTABLISH / LMP timeout.
+    8 || 62 => 'Couldn\'t reach the bot. $retry',
+    // 0x85 GATT_ERROR — Android's generic BLE failure.
+    133 => 'Android BLE stack error. $retry',
+    // 0x13 remote terminated, 0x16 local host terminated.
+    19 => 'Bot closed the link. $retry',
+    22 => 'Phone closed the link. $retry',
+    _ when status != null => '$action failed (status $status). $retry',
+    _ => '$action failed. $retry',
+  };
+}
+
+/// One-line log form of a BLE plugin exception. Never includes the Java stack.
+String bleLogDetail(Object error) {
+  final status = bleGattStatus(error);
+  if (status != null) return 'GATT status $status';
+  final first = error.toString().split('\n').first.trim();
+  return first.length > 160 ? '${first.substring(0, 157)}...' : first;
+}
+
+int? bleGattStatus(Object error) {
+  final match = RegExp(r'status:\s*(\d+)').firstMatch(error.toString());
+  if (match == null) return null;
+  return int.tryParse(match.group(1)!);
+}
+
+bool bleConnectIsRetryable(Object error) {
+  final status = bleGattStatus(error);
+  return status == 8 || status == 62 || status == 133;
+}
 
 /// Companion-side connection lifecycle.
 enum BotLinkState {
@@ -61,9 +100,17 @@ final class _ControlWrite {
 }
 
 final class BotLink extends ChangeNotifier {
-  BotLink() : _central = CentralManager();
+  BotLink({this.canRequestPermissions = true}) : _central = CentralManager();
 
   final CentralManager _central;
+
+  /// Whether this isolate can show the OS permission dialog. False in the
+  /// foreground service isolate: the BLE plugin's authorize() needs an
+  /// Activity, which a background engine never has (verified against
+  /// bluetooth_low_energy_android 6.2.1 — everything else in the central
+  /// path is Context-only). Permission granting is the UI's job, before the
+  /// service starts.
+  final bool canRequestPermissions;
 
   // --- state surfaced to the UI ---
 
@@ -113,8 +160,17 @@ final class BotLink extends ChangeNotifier {
   bool _started = false;
   bool _stopping = false;
 
+  /// True while [connect] is in flight (including retries). The plugin
+  /// emits a disconnected event for every failed connectGatt; those must
+  /// not tear the session down or we cannot retry the same peripheral.
+  bool _establishing = false;
+
   static const Duration _connectTimeoutDuration = Duration(seconds: 15);
   static const Duration _maxBackoff = Duration(seconds: 30);
+
+  /// Used after stopScan on connect retry #2. Attempt 1 connects *while*
+  /// still scanning so the controller can hear the next advertisement.
+  static const Duration _postScanSettle = Duration(milliseconds: 400);
 
   /// Outbound queues. Control jumps ahead of audio, always.
   final Queue<_ControlWrite> _controlQueue = Queue();
@@ -130,19 +186,41 @@ final class BotLink extends ChangeNotifier {
     if (_started) return;
     _started = true;
 
-    _subscriptions.add(_central.stateChanged.listen(_onRadioState));
-    _subscriptions.add(_central.discovered.listen(_onDiscovered));
-    _subscriptions
-        .add(_central.connectionStateChanged.listen(_onConnectionState));
-    _subscriptions.add(_central.mtuChanged.listen((e) {
+    _listen(_central.stateChanged, _onRadioState);
+    _listen(_central.discovered, _onDiscovered);
+    _listen(_central.connectionStateChanged, _onConnectionState);
+    _listen(_central.mtuChanged, (e) async {
       if (e.peripheral.uuid != _peripheral?.uuid) return;
       mtu = e.mtu;
       Log.i(_tag, 'MTU changed: ${e.mtu}');
       notifyListeners();
-    }));
-    _subscriptions.add(_central.characteristicNotified.listen(_onNotified));
+    });
+    _listen(_central.characteristicNotified, _onNotified);
 
     _onRadioState(BluetoothLowEnergyStateChangedEventArgs(_central.state));
+  }
+
+  /// BLE plugin streams must not crash the service isolate. Async handlers
+  /// are not awaited by [Stream.listen], so errors would otherwise become
+  /// unhandled (Flutter's red error screen in the UI isolate, or a dead
+  /// service).
+  void _listen<T>(Stream<T> stream, FutureOr<void> Function(T) onEvent) {
+    _subscriptions.add(stream.listen(
+      (event) {
+        Future<void> run() async {
+          try {
+            await onEvent(event);
+          } catch (e, st) {
+            Log.e(_tag, 'BLE event handler failed (${bleLogDetail(e)})', null, st);
+          }
+        }
+
+        unawaited(run());
+      },
+      onError: (Object e, StackTrace st) {
+        Log.e(_tag, 'BLE stream error (${bleLogDetail(e)})', null, st);
+      },
+    ));
   }
 
   Future<void> _onRadioState(
@@ -152,6 +230,14 @@ final class BotLink extends ChangeNotifier {
 
     switch (args.state) {
       case BluetoothLowEnergyState.unauthorized:
+        if (!canRequestPermissions) {
+          // Service isolate: no Activity, no dialog. Surface the state and
+          // wait — the UI grants and the radio re-announces poweredOn.
+          state = BotLinkState.unauthorized;
+          lastError = 'Bluetooth permission missing. Open the app to grant.';
+          Log.w(_tag, 'unauthorized in a no-permission-request context');
+          break;
+        }
         final granted = await _central.authorize();
         if (!granted) {
           state = BotLinkState.unauthorized;
@@ -194,8 +280,8 @@ final class BotLink extends ChangeNotifier {
     } catch (e) {
       // Typical cause: scan requested while the radio is settling. Retry
       // through the normal backoff path.
-      lastError = 'Scan failed: $e';
-      Log.e(_tag, 'startDiscovery failed', e);
+      lastError = bleFailureMessage('Scan', e);
+      Log.e(_tag, 'startDiscovery failed (${bleLogDetail(e)})');
       _scheduleReconnect();
     }
     notifyListeners();
@@ -211,30 +297,72 @@ final class BotLink extends ChangeNotifier {
         'found bot $botId (rssi ${args.rssi}, name ${args.advertisement.name})');
     notifyListeners();
 
+    _establishing = true;
     try {
-      await _central.stopDiscovery();
-    } catch (e) {
-      Log.w(_tag, 'stopDiscovery failed: $e');
+      await _connectWithRetries(args.peripheral);
+    } finally {
+      _establishing = false;
     }
+  }
+
+  /// Phone-to-phone BLE often fails the first `connectGatt` with status 62
+  /// (HCI connection failed to establish). Attempt 1 keeps the scan running
+  /// so the controller can still hear advertisements; later attempts stop
+  /// the scan (the other classic Android workaround) and retry in place
+  /// before falling back to a full rescan.
+  Future<void> _connectWithRetries(Peripheral peripheral) async {
+    const maxAttempts = 3;
+    Object? lastFailure;
 
     _connectTimeout = Timer(_connectTimeoutDuration, () async {
       Log.w(_tag, 'connect timed out after $_connectTimeoutDuration');
-      lastError = 'Connect timed out';
+      lastError = 'Connect timed out. Retrying…';
       try {
-        await _central.disconnect(_peripheral!);
+        await _central.disconnect(peripheral);
       } catch (_) {}
+      _dropSession();
       _scheduleReconnect();
     });
 
-    try {
-      await _central.connect(args.peripheral);
-      // Success path continues in _onConnectionState(connected).
-    } catch (e) {
-      _connectTimeout?.cancel();
-      lastError = 'Connect failed: $e';
-      Log.e(_tag, 'connect failed', e);
-      _scheduleReconnect();
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (_stopping || state != BotLinkState.connecting) return;
+
+      if (attempt == 2) {
+        try {
+          await _central.stopDiscovery();
+        } catch (e) {
+          Log.w(_tag, 'stopDiscovery failed: ${bleLogDetail(e)}');
+        }
+        await Future<void>.delayed(_postScanSettle);
+        if (_stopping || state != BotLinkState.connecting) return;
+      } else if (attempt > 2) {
+        try {
+          await _central.disconnect(peripheral);
+        } catch (_) {}
+        await Future<void>.delayed(Duration(milliseconds: 300 * (attempt - 1)));
+        if (_stopping || state != BotLinkState.connecting) return;
+      }
+
+      try {
+        Log.i(_tag, 'connect attempt $attempt/$maxAttempts');
+        await _central.connect(peripheral);
+        // Success path continues in _onConnectionState(connected).
+        return;
+      } catch (e) {
+        lastFailure = e;
+        Log.w(_tag,
+            'connect attempt $attempt/$maxAttempts failed (${bleLogDetail(e)})');
+        if (attempt == maxAttempts || !bleConnectIsRetryable(e)) break;
+      }
     }
+
+    _connectTimeout?.cancel();
+    lastError = bleFailureMessage('Connect', lastFailure ?? 'unknown');
+    try {
+      await _central.stopDiscovery();
+    } catch (_) {}
+    _dropSession();
+    _scheduleReconnect();
   }
 
   Future<void> _onConnectionState(
@@ -243,8 +371,16 @@ final class BotLink extends ChangeNotifier {
 
     if (args.state == ConnectionState.connected) {
       _connectTimeout?.cancel();
+      if (state == BotLinkState.configuring || state == BotLinkState.ready) {
+        return;
+      }
+      try {
+        await _central.stopDiscovery();
+      } catch (_) {}
       await _configure();
     } else {
+      // Failed connectGatt emits disconnected; retries handle that.
+      if (_establishing) return;
       final wasReady = state == BotLinkState.ready;
       Log.w(_tag, 'disconnected (was ${state.name})');
       _dropSession();
@@ -274,7 +410,7 @@ final class BotLink extends ChangeNotifier {
       } catch (e) {
         // Not fatal: proceed at whatever the default is; the chunker
         // adapts frame size to `mtu`.
-        Log.w(_tag, 'requestMTU failed, staying at $mtu: $e');
+        Log.w(_tag, 'requestMTU failed, staying at $mtu: ${bleLogDetail(e)}');
       }
 
       final services = await _central.discoverGATT(peripheral);
@@ -309,8 +445,8 @@ final class BotLink extends ChangeNotifier {
       notifyListeners();
       _pump();
     } catch (e) {
-      lastError = 'Setup failed: $e';
-      Log.e(_tag, 'configure failed', e);
+      lastError = bleFailureMessage('Setup', e);
+      Log.e(_tag, 'configure failed (${bleLogDetail(e)})');
       try {
         await _central.disconnect(peripheral);
       } catch (_) {}
@@ -321,7 +457,12 @@ final class BotLink extends ChangeNotifier {
 
   void _scheduleReconnect() {
     if (_stopping || radioState != BluetoothLowEnergyState.poweredOn) return;
-    _cancelTimers();
+    // A failed connect completes the connect Future *and* emits a
+    // disconnected event; both paths land here. Keep one timer.
+    if (_reconnectTimer != null) return;
+
+    _connectTimeout?.cancel();
+    _connectTimeout = null;
 
     // 0.5s, 1s, 2s, 4s ... capped at 30s.
     final millis = 500 * (1 << reconnectAttempt.clamp(0, 10));
@@ -336,6 +477,7 @@ final class BotLink extends ChangeNotifier {
 
     _reconnectTimer = Timer(delay, () {
       nextReconnectAt = null;
+      _reconnectTimer = null;
       _startScan();
     });
   }
@@ -447,7 +589,7 @@ final class BotLink extends ChangeNotifier {
                 type: GATTCharacteristicWriteType.withResponse);
             write.completer.complete();
           } catch (e) {
-            Log.e(_tag, 'control write failed', e);
+            Log.e(_tag, 'control write failed (${bleLogDetail(e)})');
             write.completer.completeError(e);
           }
         } else {
@@ -458,7 +600,7 @@ final class BotLink extends ChangeNotifier {
                 type: GATTCharacteristicWriteType.withoutResponse);
           } catch (e) {
             // One lost audio frame is 20 ms of speech; log and move on.
-            Log.w(_tag, 'audio write failed: $e');
+            Log.w(_tag, 'audio write failed: ${bleLogDetail(e)}');
           }
         }
       }
@@ -501,7 +643,7 @@ final class BotLink extends ChangeNotifier {
       try {
         await _central.disconnect(peripheral);
       } catch (e) {
-        Log.w(_tag, 'disconnect during teardown: $e');
+        Log.w(_tag, 'disconnect during teardown: ${bleLogDetail(e)}');
       }
     }
     _dropSession();

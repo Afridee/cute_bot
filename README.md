@@ -4,8 +4,8 @@ Flutter companion app for a small desk robot (mic + speaker + BLE; ESP32 later).
 All intelligence runs on the phone, fully offline. The bot is ears, a mouth,
 and a face.
 
-**Milestone status: M1 complete (agent bar). Awaiting the M1 human-bar test —
-the bandwidth gate. See `Docs/m1-testing-guide.md`.**
+**Milestone status: M2 complete (agent bar). Awaiting the M2 human-bar test —
+kill/reboot survival on real phones. See `Docs/m2-testing-guide.md`.**
 
 ## Layout
 
@@ -16,7 +16,9 @@ the bandwidth gate. See `Docs/m1-testing-guide.md`.**
 | `lib/shared/audio_transport.dart` | M1 framing/reassembly: MTU-aware chunker (sender) and loss/duplicate/reorder-tolerant reassembler (receiver), plus the FNV-1a delivery checksum. Dependency-free, firmware-portable. |
 | `lib/shared/log.dart` | Single logging channel with levels. `adb logcat | grep CuteBot`. |
 | `lib/bot_simulator/` | Peripheral (GATT server) mode: a second Android phone standing in for the ESP32. |
-| `lib/companion/` | Central mode — the actual app. M1: `bot_link.dart` (scan / auto-connect / MTU 517 / reconnect backoff / prioritized writes) + debug panel with bandwidth-gate instrumentation. |
+| `lib/companion/` | Central mode — the actual app. `bot_link.dart` (scan / auto-connect / MTU 517 / reconnect backoff / prioritized writes); since M2 the UI is a thin client over the foreground service. |
+| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the M3 `BotBrain` interface, defined before any inference code), `fake_brain.dart` (canned responses at realistic delays), `brain_session.dart` (serialized conversation queue + recovery), `transcript.dart` (durable transcript behind a `KeyValueStore`). |
+| `lib/companion/service/` | M2 foreground service: `bot_service.dart` (the service isolate that owns BotLink + the brain), `service_ipc.dart` (UI↔service message schema), `task_storage.dart` (persistence backend). |
 
 ## Toolchain
 
@@ -32,7 +34,16 @@ the bandwidth gate. See `Docs/m1-testing-guide.md`.**
   companion in M1. `flutter_blue_plus` is central-only, which rules it out.
 - `record` 6.2.1 — simulator mic capture as a PCM16 stream. (7.x needs
   Dart ≥ 3.12; this project is on 3.11.5.)
-- `flutter_pcm_sound` 3.3.3 — simulator real-time raw PCM16 playback.
+- `flutter_pcm_sound` 3.3.3 — simulator real-time raw PCM16 playback (also
+  used by the service isolate for the live-monitor diagnostic since M2).
+- `flutter_foreground_task` 10.0.0 — the M2 foreground service. Named in the
+  brief; chosen over a hand-written platform-channel service because it
+  already does the hard parts: a separate service-owned Flutter engine with
+  automatic plugin registration, two-way isolate messaging, START_STICKY,
+  `allowAutoRestart` (system-kill recovery), `autoRunOnBoot` (BOOT_COMPLETED
+  receiver), battery-optimization helpers, and a SharedPreferences-backed
+  store used for transcript persistence. (11.0.0 exists but needs a newer
+  Dart than 3.11.5; 10.0.0 has every API M2 uses.)
 
 ## Protocol summary (v1)
 
@@ -59,6 +70,24 @@ live, and scored for the bandwidth gate: ×-real-time rate, kbps, worst
 inter-frame gap, loss/dup/stale counts, and an FNV-1a checksum the simulator
 also displays for the byte-identical check. `Docs/m1-testing-guide.md` walks
 the two-phone test.
+
+## M2 in one paragraph
+
+The bot lives in an Android foreground service (`foregroundServiceType=
+connectedDevice`), in its own Flutter engine/isolate. That isolate — not the
+UI — owns the BLE central link, an `UtteranceReassembler`, and a
+`BrainSession` wrapping a `FakeBrain` behind the M3 `BotBrain` interface, so
+swiping the app out of recents changes nothing the bot can see. Utterances
+arriving off the radio flow straight into a strictly serialized conversation
+queue (the LiteRT-LM one-conversation rule, enforced from day one); every
+transcript line persists on append via flutter_foreground_task's store, and
+on restart the session reloads the transcript, re-warms, and shows warming
+state on the bot's LEDs (breathing blue) while it does. Kill → restart →
+re-warm is handled as a normal lifecycle: START_STICKY + `allowAutoRestart`
+cover system kills, `autoRunOnBoot` covers reboot, and the UI — now a thin
+client — just renders `ServiceSnapshot`s pushed over the task channel and
+runs the permission flows the service isolate cannot (BLE authorize needs an
+Activity). `Docs/m2-testing-guide.md` walks the kill matrix.
 
 ## Running the M0 human-bar test
 
@@ -91,5 +120,20 @@ the two-phone test.
   Half-duplex is the planned v1 answer; `BotState.speaking` exists in the
   protocol for exactly that.
 - Simulator battery telemetry is faked (87%, 3970 mV).
+- **Boot restart (M2):** `autoRunOnBoot` uses a BOOT_COMPLETED receiver.
+  `connectedDevice` services are allowed to start from BOOT_COMPLETED on
+  Android 15+, but Android 12+ background-start restrictions and OEM battery
+  managers can still block it; if the human-bar reboot test fails on a given
+  device, the fallback the brief asks for (a tappable notification instead of
+  silent failure) still needs building.
+- **BLE from the service isolate (M2):** verified by source inspection of
+  `bluetooth_low_energy_android` 6.2.1 — scan/connect/notify are
+  Context-only; only `authorize()`/`showAppSettings()` need an Activity, so
+  the UI grants permissions before the service starts. Needs on-device
+  confirmation in the M2 human bar.
+- The service's warming/thinking LED expressions assume the bot is connected;
+  a bot that reconnects mid-state gets a re-send, but a bot that was never
+  connected during warm-up simply misses the show. Harmless, revisit with
+  real hardware.
 - iOS is deliberately unsupported (long-lived foreground service + multi-GB
   model has no iOS equivalent).

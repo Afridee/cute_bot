@@ -1,340 +1,261 @@
-// Companion-mode controller (M1). Composes BotLink (radio) with the
-// framing/reassembly layer and exposes everything the debug panel needs:
+// Companion-mode controller, M2 shape: a thin client over the foreground
+// service. The service isolate owns the BLE link and the brain
+// (bot_service.dart); this class owns only what genuinely belongs to the
+// UI process:
 //
-// - live monitor: bot mic audio plays on this phone as it arrives (this is
-//   how a human judges transport latency directly)
-// - per-utterance stats for the bandwidth gate: frames, loss, checksum,
-//   receive rate vs real time, worst inter-frame gap
-// - replay of the last utterance and echo back to the bot's speaker (the
-//   phone -> bot half of the duplex test), with throughput measured
-// - control commands (LED / wiggle / sound / battery) with round-trip time
-//   measured via the acked control write + telemetry reply
+// - permission flows (BLE, notifications, battery-optimization exemption)
+//   — these need an Activity, which the service never has
+// - starting/attaching-to/stopping the service
+// - rendering the latest ServiceSnapshot pushed over the task channel
+//
+// Deliberately NOT here anymore: BotLink, audio, the brain. Killing this
+// object (or the whole Activity) must not kill the bot.
 
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:bluetooth_low_energy/bluetooth_low_energy.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
-import '../shared/audio_transport.dart';
 import '../shared/ble_protocol.dart';
 import '../shared/log.dart';
-import 'bot_link.dart';
+import 'service/bot_service.dart';
+import 'service/service_ipc.dart';
 
-const String _tag = 'Companion';
+const String _tag = 'CompanionUi';
 
-/// One line in the on-screen activity log.
-final class CompanionLogEntry {
-  CompanionLogEntry(this.message) : timestamp = DateTime.now();
-  final DateTime timestamp;
-  final String message;
-}
+/// Where the controller is in its bring-up sequence.
+enum CompanionUiPhase {
+  idle,
+  requestingPermissions,
 
-/// Bandwidth-gate numbers for one received utterance.
-final class ReceiveStats {
-  const ReceiveStats({
-    required this.result,
-    required this.wallMillis,
-    required this.maxInterFrameGapMillis,
-  });
+  /// BLE permission denied — the service would sit unauthorized forever,
+  /// so we do not start it. Terminal until the user grants.
+  permissionDenied,
+  startingService,
 
-  final UtteranceResult result;
-
-  /// Wall-clock time from first to last frame arrival.
-  final int wallMillis;
-
-  /// Worst gap between consecutive frame arrivals — a proxy for jitter
-  /// a playback buffer would need to absorb.
-  final int maxInterFrameGapMillis;
-
-  int get audioMillis => result.audioDuration.inMilliseconds;
-
-  /// Receive rate as a multiple of real time. >= 1.0 passes the gate.
-  double get realTimeRate =>
-      wallMillis <= 0 ? double.infinity : audioMillis / wallMillis;
-
-  /// Payload throughput on the wire (ADPCM bits, not counting headers).
-  double get kbps => wallMillis <= 0
-      ? 0
-      : (result.framesReceived * AudioWireFormat.adpcmBlockBytes * 8) /
-          wallMillis;
-}
-
-/// Throughput numbers for one utterance echoed back to the bot.
-final class EchoStats {
-  const EchoStats({required this.audioMillis, required this.wallMillis});
-
-  final int audioMillis;
-  final int wallMillis;
-
-  double get realTimeRate =>
-      wallMillis <= 0 ? double.infinity : audioMillis / wallMillis;
+  /// Service running (or attached to an already-running one); snapshots
+  /// flow. The normal state.
+  running,
+  stopped,
 }
 
 final class CompanionController extends ChangeNotifier {
-  CompanionController() {
-    _reassembler = UtteranceReassembler(
-      onPcm: _onLivePcm,
-      onUtterance: _onUtteranceComplete,
-    );
-  }
+  CompanionUiPhase phase = CompanionUiPhase.idle;
+  String? phaseError;
 
-  final BotLink link = BotLink();
-  late final UtteranceReassembler _reassembler;
+  /// Latest state pushed by the service. Null until the first snapshot.
+  ServiceSnapshot? snapshot;
 
-  final List<StreamSubscription> _subscriptions = [];
+  /// Time of the last snapshot, to surface a stale service in the UI.
+  DateTime? lastSnapshotAt;
 
-  // --- state surfaced to the UI ---
+  bool batteryOptimizationExempt = false;
 
-  /// Play bot audio on this phone's speaker as it arrives.
-  bool liveMonitor = true;
-
-  bool receivingUtterance = false;
-  int framesThisUtterance = 0;
-
-  ReceiveStats? lastReceive;
-  Int16List? lastUtterancePcm;
-
-  bool echoing = false;
-  EchoStats? lastEcho;
-
-  BotState botState = BotState.idle;
-  BatteryStatusMessage? battery;
-  int? batteryRttMillis;
-
-  final List<CompanionLogEntry> activityLog = [];
-  static const int _maxLogEntries = 60;
-
-  // --- internals ---
-
-  final SequenceCounter _controlSeq = SequenceCounter();
-
-  DateTime? _utteranceFirstArrival;
-  DateTime? _lastFrameArrival;
-  int _maxInterFrameGapMillis = 0;
-
-  DateTime? _batteryRequestedAt;
-
-  bool _playbackReady = false;
   bool _started = false;
+  bool _disposed = false;
 
   Future<void> start() async {
     if (_started) return;
     _started = true;
 
-    link.addListener(notifyListeners);
-    _subscriptions.add(link.audioFromBot.listen(_onAudioFrame));
-    _subscriptions.add(link.telemetry.listen(_onTelemetry));
+    FlutterForegroundTask.addTaskDataCallback(_onTaskData);
+    _initService();
 
-    try {
-      await FlutterPcmSound.setup(
-        sampleRate: AudioWireFormat.sampleRate,
-        channelCount: AudioWireFormat.channels,
-      );
-      await FlutterPcmSound.setFeedThreshold(0);
-      _playbackReady = true;
-    } catch (e) {
-      // Playback failure must not take down the link.
-      Log.e(_tag, 'PCM playback setup failed', e);
-      _logActivity('Speaker unavailable: $e');
-    }
-
-    await link.start();
-  }
-
-  // --- inbound audio ---
-
-  void _onAudioFrame(AudioChunkMessage message) {
-    final now = DateTime.now();
-    if (message.isUtteranceStart || !receivingUtterance) {
-      receivingUtterance = true;
-      framesThisUtterance = 0;
-      _utteranceFirstArrival = now;
-      _lastFrameArrival = now;
-      _maxInterFrameGapMillis = 0;
-    } else if (_lastFrameArrival != null) {
-      final gap = now.difference(_lastFrameArrival!).inMilliseconds;
-      if (gap > _maxInterFrameGapMillis) _maxInterFrameGapMillis = gap;
-    }
-    _lastFrameArrival = now;
-    if (message.adpcmBlock.isNotEmpty) framesThisUtterance += 1;
-
-    _reassembler.add(message);
-
-    // Keep UI churn off the audio path: ~every half second.
-    if (framesThisUtterance % 25 == 0 || message.isUtteranceEnd) {
+    // Attach path: service already running (started earlier, or auto-
+    // restarted after kill/boot). Don't redo permissions, just listen.
+    if (await FlutterForegroundTask.isRunningService) {
+      Log.i(_tag, 'attaching to already-running service');
+      phase = CompanionUiPhase.running;
+      _send(const RequestSnapshotUiCommand());
+      unawaited(_refreshBatteryOptimization());
       notifyListeners();
+      return;
     }
-  }
 
-  void _onLivePcm(Int16List pcm) {
-    if (liveMonitor && _playbackReady) {
-      unawaited(FlutterPcmSound.feed(PcmArrayInt16.fromList(pcm)));
-    }
-  }
-
-  void _onUtteranceComplete(UtteranceResult result) {
-    receivingUtterance = false;
-    final first = _utteranceFirstArrival;
-    final last = _lastFrameArrival;
-    final wallMillis = (first != null && last != null)
-        ? last.difference(first).inMilliseconds
-        : 0;
-
-    lastReceive = ReceiveStats(
-      result: result,
-      wallMillis: wallMillis,
-      maxInterFrameGapMillis: _maxInterFrameGapMillis,
-    );
-    if (result.pcm.isNotEmpty) lastUtterancePcm = result.pcm;
-
-    final s = lastReceive!;
-    _logActivity(
-        'Utterance: ${result.framesReceived} frames, ${result.framesLost} lost'
-        '${result.duplicateFrames > 0 ? ', ${result.duplicateFrames} dup' : ''}'
-        '${result.staleFrames > 0 ? ', ${result.staleFrames} stale' : ''}'
-        ' · ${s.audioMillis} ms audio in ${s.wallMillis} ms'
-        ' (${s.realTimeRate.toStringAsFixed(2)}x RT, '
-        '${s.kbps.toStringAsFixed(0)} kbps)'
-        ' · crc ${result.checksumHex}');
-    if (!result.sawStart) _logActivity('  first frame was lost');
-    if (!result.sawEnd) _logActivity('  end frame never arrived');
-    Log.i(_tag,
-        'utterance done: ${result.framesReceived} rx / ${result.framesLost} lost, ${s.realTimeRate.toStringAsFixed(2)}x RT, crc ${result.checksumHex}');
-    notifyListeners();
-  }
-
-  // --- inbound telemetry ---
-
-  void _onTelemetry(BotMessage message) {
-    switch (message) {
-      case BatteryStatusMessage():
-        battery = message;
-        final requestedAt = _batteryRequestedAt;
-        if (requestedAt != null) {
-          batteryRttMillis =
-              DateTime.now().difference(requestedAt).inMilliseconds;
-          _batteryRequestedAt = null;
-          _logActivity(
-              'Battery ${message.percent}% (${message.millivolts} mV) — RTT $batteryRttMillis ms');
-        } else {
-          _logActivity('Battery ${message.percent}%');
-        }
-      case BotStateMessage(:final state):
-        botState = state;
-        _logActivity('Bot state: ${state.name}');
-      default:
-        Log.w(_tag, 'unexpected telemetry: $message');
-    }
-    notifyListeners();
-  }
-
-  // --- local replay ---
-
-  void playLastUtterance() {
-    final pcm = lastUtterancePcm;
-    if (pcm == null || !_playbackReady) return;
-    _logActivity('Replaying last utterance locally');
-    unawaited(FlutterPcmSound.feed(PcmArrayInt16.fromList(pcm)));
-  }
-
-  // --- echo to bot (phone -> bot audio path, duplex half of the gate) ---
-
-  Future<void> echoToBot() async {
-    final pcm = lastUtterancePcm;
-    if (pcm == null || echoing || link.state != BotLinkState.ready) return;
-    echoing = true;
+    phase = CompanionUiPhase.requestingPermissions;
     notifyListeners();
 
-    // Chunk at the *current* MTU — this is the fallback path the protocol
-    // requires when the OS grants less than 517. Fresh chunker per echo:
-    // MTU can change across reconnects. (Sequence restarts at 0, which the
-    // receiver accepts because the start-of-utterance flag resets it.)
-    final chunker = UtteranceChunker(mtu: link.mtu);
-    final audioMillis = pcm.length * 1000 ~/ AudioWireFormat.sampleRate;
-    _logActivity('Echoing $audioMillis ms to bot (MTU ${link.mtu}, '
-        '${chunker.samplesPerFrame} samples/frame)');
-
-    final started = DateTime.now();
-    for (final frame in chunker.addSamples(pcm)) {
-      link.sendAudioFrame(frame);
-    }
-    for (final frame in chunker.finish()) {
-      link.sendAudioFrame(frame);
-    }
-
-    // Fire-and-forget writes: wait for the queue to drain to measure
-    // actual wire throughput.
-    while (link.queuedAudioFrames > 0 && link.state == BotLinkState.ready) {
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-    }
-    final wallMillis = DateTime.now().difference(started).inMilliseconds;
-
-    lastEcho = EchoStats(audioMillis: audioMillis, wallMillis: wallMillis);
-    echoing = false;
-    _logActivity('Echo sent: $audioMillis ms audio in $wallMillis ms '
-        '(${lastEcho!.realTimeRate.toStringAsFixed(2)}x RT)'
-        '${link.audioFramesDroppedOnSend > 0 ? ' · ${link.audioFramesDroppedOnSend} dropped from queue' : ''}');
-    Log.i(_tag,
-        'echo done: $audioMillis ms in $wallMillis ms (${lastEcho!.realTimeRate.toStringAsFixed(2)}x RT)');
-    notifyListeners();
-  }
-
-  // --- control commands ---
-
-  Future<void> setLed(int red, int green, int blue, LedPattern pattern) =>
-      _control(
-          SetLedCommand(
-            sequence: _controlSeq.next(),
-            red: red,
-            green: green,
-            blue: blue,
-            pattern: pattern,
-          ),
-          'set_led rgb($red,$green,$blue) ${pattern.name}');
-
-  Future<void> wiggle() =>
-      _control(WiggleCommand(sequence: _controlSeq.next()), 'wiggle');
-
-  Future<void> playSound(BotSound sound) => _control(
-      PlaySoundCommand(sequence: _controlSeq.next(), sound: sound),
-      'play_sound ${sound.name}');
-
-  Future<void> getBattery() {
-    _batteryRequestedAt = DateTime.now();
-    return _control(
-        GetBatteryCommand(sequence: _controlSeq.next()), 'get_battery');
-  }
-
-  Future<void> _control(ControlMessage message, String label) async {
+    // Notification permission (Android 13+): without it the foreground
+    // service still runs but its notification is invisible; ask once.
     try {
-      final started = DateTime.now();
-      await link.sendControl(message);
-      final ackMillis = DateTime.now().difference(started).inMilliseconds;
-      _logActivity('$label · acked in $ackMillis ms');
+      final status = await FlutterForegroundTask.checkNotificationPermission();
+      if (status != NotificationPermission.granted) {
+        await FlutterForegroundTask.requestNotificationPermission();
+      }
     } catch (e) {
-      _logActivity('$label FAILED: $e');
-      Log.e(_tag, '$label failed', e);
+      Log.w(_tag, 'notification permission flow failed: $e');
+    }
+
+    // BLE permission MUST be granted here: the service isolate has no
+    // Activity and cannot show the dialog (bluetooth_low_energy authorize()
+    // is Activity-bound).
+    final bleGranted = await _ensureBlePermission();
+    if (!bleGranted) {
+      phase = CompanionUiPhase.permissionDenied;
+      phaseError = 'Bluetooth permission is required. Grant it in settings, '
+          'then come back.';
+      notifyListeners();
+      return;
+    }
+
+    // Battery-optimization exemption: OEM battery managers are one of the
+    // two documented killers of this service. Ask; the user can refuse.
+    await _refreshBatteryOptimization();
+    if (!batteryOptimizationExempt) {
+      try {
+        await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+        await _refreshBatteryOptimization();
+      } catch (e) {
+        Log.w(_tag, 'battery optimization request failed: $e');
+      }
+    }
+
+    phase = CompanionUiPhase.startingService;
+    notifyListeners();
+
+    final result = await FlutterForegroundTask.startService(
+      serviceId: 1007,
+      serviceTypes: [ForegroundServiceTypes.connectedDevice],
+      notificationTitle: 'Cute Bot',
+      notificationText: 'starting…',
+      callback: botServiceStartCallback,
+    );
+    if (result is ServiceRequestFailure) {
+      phase = CompanionUiPhase.stopped;
+      phaseError = 'Service failed to start: ${result.error}';
+      Log.e(_tag, 'startService failed', result.error);
+    } else {
+      phase = CompanionUiPhase.running;
+      phaseError = null;
+      _send(const RequestSnapshotUiCommand());
     }
     notifyListeners();
   }
 
-  void toggleLiveMonitor() {
-    liveMonitor = !liveMonitor;
+  void _initService() {
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'cute_bot_service',
+        channelName: 'Cute Bot',
+        channelDescription:
+            'Keeps the bot connected and the brain warm in the background.',
+        onlyAlertOnce: true,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(
+        showNotification: false,
+        playSound: false,
+      ), // iOS unsupported by design (see README); required arg regardless.
+      foregroundTaskOptions: ForegroundTaskOptions(
+        // Heartbeat snapshot every 5 s; real updates are push-on-change.
+        eventAction: ForegroundTaskEventAction.repeat(5000),
+        autoRunOnBoot: true,
+        autoRunOnMyPackageReplaced: true,
+        allowWakeLock: true,
+        allowAutoRestart: true,
+      ),
+    );
+  }
+
+  Future<bool> _ensureBlePermission() async {
+    try {
+      final central = CentralManager();
+      var state = central.state;
+      if (state == BluetoothLowEnergyState.unknown) {
+        // Platform side may still be initializing; wait for the first real
+        // state, bounded.
+        state = await central.stateChanged
+            .map((e) => e.state)
+            .firstWhere((s) => s != BluetoothLowEnergyState.unknown)
+            .timeout(const Duration(seconds: 3),
+                onTimeout: () => central.state);
+      }
+      if (state == BluetoothLowEnergyState.unauthorized) {
+        return await central.authorize();
+      }
+      return state != BluetoothLowEnergyState.unsupported;
+    } catch (e) {
+      Log.e(_tag, 'BLE permission check failed', e);
+      return false;
+    }
+  }
+
+  Future<void> _refreshBatteryOptimization() async {
+    try {
+      batteryOptimizationExempt =
+          await FlutterForegroundTask.isIgnoringBatteryOptimizations;
+    } catch (e) {
+      Log.w(_tag, 'battery optimization check failed: $e');
+    }
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> requestBatteryExemption() async {
+    try {
+      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+    } catch (e) {
+      Log.w(_tag, 'battery optimization request failed: $e');
+    }
+    await _refreshBatteryOptimization();
+  }
+
+  /// Deliberate user stop — the only path that kills the bot on purpose.
+  Future<void> stopService() async {
+    await FlutterForegroundTask.stopService();
+    phase = CompanionUiPhase.stopped;
+    snapshot = null;
     notifyListeners();
   }
 
-  // --- misc ---
+  Future<void> restartService() async {
+    phase = CompanionUiPhase.idle;
+    _started = false;
+    snapshot = null;
+    await start();
+  }
 
-  void _logActivity(String message) {
-    activityLog.insert(0, CompanionLogEntry(message));
-    if (activityLog.length > _maxLogEntries) {
-      activityLog.removeRange(_maxLogEntries, activityLog.length);
+  // --- commands through to the service ---
+
+  void setLed(int red, int green, int blue, LedPattern pattern) => _send(
+      SetLedUiCommand(red: red, green: green, blue: blue, pattern: pattern));
+
+  void wiggle() => _send(const WiggleUiCommand());
+
+  void playSound(BotSound sound) => _send(PlaySoundUiCommand(sound));
+
+  void getBattery() => _send(const GetBatteryUiCommand());
+
+  void toggleLiveMonitor() =>
+      _send(SetLiveMonitorUiCommand(!(snapshot?.liveMonitor ?? true)));
+
+  void echoLastUtterance() => _send(const EchoLastUtteranceUiCommand());
+
+  void simulateUtterance() =>
+      _send(const SimulateUtteranceUiCommand(millis: 1200));
+
+  void clearTranscript() => _send(const ClearTranscriptUiCommand());
+
+  void _send(UiCommand command) {
+    try {
+      FlutterForegroundTask.sendDataToTask(command.toMap());
+    } catch (e) {
+      Log.w(_tag, 'sendDataToTask failed: $e');
+    }
+  }
+
+  // --- inbound snapshots ---
+
+  void _onTaskData(Object data) {
+    final decoded = ServiceSnapshot.fromMap(data);
+    if (decoded == null) return;
+    snapshot = decoded;
+    lastSnapshotAt = DateTime.now();
+    if (phase != CompanionUiPhase.running) {
+      // Snapshots prove the service is up regardless of our bookkeeping.
+      phase = CompanionUiPhase.running;
     }
     notifyListeners();
   }
-
-  bool _disposed = false;
 
   @override
   void notifyListeners() {
@@ -344,15 +265,8 @@ final class CompanionController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _reassembler.reset();
-    for (final sub in _subscriptions) {
-      unawaited(sub.cancel());
-    }
-    link.removeListener(notifyListeners);
-    link.dispose();
-    if (_playbackReady) {
-      unawaited(FlutterPcmSound.release());
-    }
+    // NOTE: the service keeps running — that is the whole point of M2.
+    FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
     super.dispose();
   }
 }
