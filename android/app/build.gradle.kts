@@ -41,3 +41,11 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Watchdog worker (M2.5). WorkManager survives process death and
+    // reboot, which is the whole point of the safety net.
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
+    // JVM unit test for the watchdog decision (BotServiceStarterTest).
+    testImplementation("junit:junit:4.13.2")
+}

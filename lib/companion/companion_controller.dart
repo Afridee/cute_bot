@@ -19,6 +19,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import '../shared/ble_protocol.dart';
 import '../shared/log.dart';
+import 'companion_device_link.dart';
 import 'service/bot_service.dart';
 import 'service/service_ipc.dart';
 
@@ -52,8 +53,17 @@ final class CompanionController extends ChangeNotifier {
 
   bool batteryOptimizationExempt = false;
 
+  /// CDM association state (M2.5). Owned here because the CDM chooser needs
+  /// an Activity, same as the permission flows.
+  final CompanionDeviceLink companionLink = CompanionDeviceLink();
+
   bool _started = false;
   bool _disposed = false;
+
+  /// Persisted marker: the battery-exemption dialog was already offered
+  /// once on this install. Ask once, don't nag (M2.5) — the manual
+  /// "Allow background" button in the UI remains for later minds.
+  static const String _batteryPromptedKey = 'batteryExemptionPrompted';
 
   Future<void> start() async {
     if (_started) return;
@@ -61,6 +71,11 @@ final class CompanionController extends ChangeNotifier {
 
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
     _initService();
+
+    // CDM association state (M2.5): refresh also re-arms presence
+    // observation natively. Fire-and-forget; the card renders when ready.
+    companionLink.addListener(notifyListeners);
+    unawaited(companionLink.refresh());
 
     // Attach path: service already running (started earlier, or auto-
     // restarted after kill/boot). Don't redo permissions, just listen.
@@ -100,10 +115,14 @@ final class CompanionController extends ChangeNotifier {
     }
 
     // Battery-optimization exemption: OEM battery managers are one of the
-    // two documented killers of this service. Ask; the user can refuse.
+    // two documented killers of this service. Ask ONCE per install; a
+    // refusal is remembered and never re-prompted (the "Allow background"
+    // button stays available in the UI).
     await _refreshBatteryOptimization();
-    if (!batteryOptimizationExempt) {
+    if (!batteryOptimizationExempt && !await _batteryPromptAlreadyOffered()) {
       try {
+        await FlutterForegroundTask.saveData(
+            key: _batteryPromptedKey, value: true);
         await FlutterForegroundTask.requestIgnoreBatteryOptimization();
         await _refreshBatteryOptimization();
       } catch (e) {
@@ -140,6 +159,20 @@ final class CompanionController extends ChangeNotifier {
         channelName: 'Cute Bot',
         channelDescription:
             'Keeps the bot connected and the brain warm in the background.',
+        // LOW: never buzzes, never sounds, but stays visible in the shade
+        // and status bar (MIN hides it entirely on several OEMs, which
+        // makes the service state invisible — bad for a debuggable
+        // companion). Channel importance is STICKY once the channel exists
+        // on a device; this was the plugin default (LOW) since M2, so
+        // existing installs already match. If this ever changes, bump the
+        // channel id or have testers clear app data.
+        // NOTE: BotServiceStarter.kt creates this same channel (same id,
+        // IMPORTANCE_LOW) for the watchdog fallback notification — keep
+        // them in sync.
+        channelImportance: NotificationChannelImportance.LOW,
+        priority: NotificationPriority.LOW,
+        playSound: false,
+        enableVibration: false,
         onlyAlertOnce: true,
       ),
       iosNotificationOptions: const IOSNotificationOptions(
@@ -176,6 +209,17 @@ final class CompanionController extends ChangeNotifier {
       return state != BluetoothLowEnergyState.unsupported;
     } catch (e) {
       Log.e(_tag, 'BLE permission check failed', e);
+      return false;
+    }
+  }
+
+  Future<bool> _batteryPromptAlreadyOffered() async {
+    try {
+      return await FlutterForegroundTask.getData<bool>(
+              key: _batteryPromptedKey) ??
+          false;
+    } catch (e) {
+      Log.w(_tag, 'battery prompt flag read failed: $e');
       return false;
     }
   }
@@ -267,6 +311,8 @@ final class CompanionController extends ChangeNotifier {
     _disposed = true;
     // NOTE: the service keeps running — that is the whole point of M2.
     FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
+    companionLink.removeListener(notifyListeners);
+    companionLink.dispose();
     super.dispose();
   }
 }

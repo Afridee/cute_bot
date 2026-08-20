@@ -27,6 +27,7 @@ import '../brain/bot_brain.dart';
 import '../brain/brain_session.dart';
 import '../brain/fake_brain.dart';
 import '../brain/transcript.dart';
+import 'notification_text.dart';
 import 'service_ipc.dart';
 import 'task_storage.dart';
 
@@ -74,7 +75,15 @@ final class BotTaskHandler extends TaskHandler {
   Timer? _pendingSnapshot;
 
   BrainSessionState? _lastExpressedBrainState;
+
+  // Notification throttle: change-only, capped at one update per gap with a
+  // trailing update so the final state always lands (same pattern as
+  // _pushSnapshot). State churns per token during a response; the shade
+  // does not need that.
+  static const Duration _minNotificationGap = Duration(seconds: 2);
   String _lastNotificationText = '';
+  DateTime _lastNotificationAt = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _pendingNotification;
 
   // --- lifecycle ---
 
@@ -129,6 +138,7 @@ final class BotTaskHandler extends TaskHandler {
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
     Log.w(_tag, 'service destroyed (timeout: $isTimeout)');
     _pendingSnapshot?.cancel();
+    _pendingNotification?.cancel();
     for (final sub in _subscriptions) {
       unawaited(sub.cancel());
     }
@@ -249,6 +259,7 @@ final class BotTaskHandler extends TaskHandler {
       default:
         Log.w(_tag, 'unexpected telemetry: $message');
     }
+    _updateNotification(); // battery is part of the notification text
     _pushSnapshot();
   }
 
@@ -443,24 +454,26 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   void _updateNotification() {
-    final linkLabel = switch (_link?.state) {
-      BotLinkState.ready => 'bot connected',
-      BotLinkState.scanning => 'looking for bot',
-      BotLinkState.reconnectWait => 'reconnecting',
-      BotLinkState.bluetoothOff => 'Bluetooth off',
-      BotLinkState.unauthorized => 'needs permission',
-      _ => 'bot offline',
-    };
-    final brainLabel = switch (_session?.state) {
-      BrainSessionState.warming => 'brain warming',
-      BrainSessionState.ready => 'brain ready',
-      BrainSessionState.thinking ||
-      BrainSessionState.responding =>
-        'brain busy',
-      _ => 'brain cold',
-    };
-    final text = '$linkLabel · $brainLabel';
+    final text = formatServiceNotificationText(
+      linkState: _link?.state ?? BotLinkState.idle,
+      brainState: _session?.state ?? BrainSessionState.cold,
+      batteryPercent: _batteryPercent,
+    );
     if (text == _lastNotificationText) return;
+
+    final now = DateTime.now();
+    final elapsed = now.difference(_lastNotificationAt);
+    if (elapsed < _minNotificationGap) {
+      // Trailing update so the last change always lands.
+      _pendingNotification ??= Timer(_minNotificationGap - elapsed, () {
+        _pendingNotification = null;
+        _updateNotification();
+      });
+      return;
+    }
+    _pendingNotification?.cancel();
+    _pendingNotification = null;
+    _lastNotificationAt = now;
     _lastNotificationText = text;
     unawaited(FlutterForegroundTask.updateService(
       notificationTitle: 'Cute Bot',

@@ -36,6 +36,21 @@
 /// with encrypted writes (anyone in radio range must not be able to drive
 /// servos or the speaker). That change touches GATT permissions only, not
 /// message encoding. Tracked by [PairingPolicy].
+///
+/// ADDENDUM (M2.5, CompanionDeviceManager wake-up): CDM device-presence
+/// tracking is identity-based, and the bot advertises with a rotating
+/// resolvable private address (Android peripherals always do; the
+/// simulator cannot opt out — bluetooth_low_energy exposes no static-
+/// address API). Resolution chosen: the companion BONDS the bot during CDM
+/// association, so the phone holds the IRK and can resolve the rotating
+/// address across rotations. This does NOT change [kPairingPolicy]: the
+/// GATT characteristics stay open/unencrypted, bonding is initiated by the
+/// companion as a CDM implementation detail and the bot merely accepts the
+/// OS pairing flow (no simulator code change; ESP32 firmware note: either
+/// accept Just Works pairing, or advertise a static address and make
+/// bonding unnecessary for presence). The M0 direction — bonded-only with
+/// encrypted writes before real hardware — is unchanged and this addendum
+/// is a step toward it.
 library;
 
 import 'dart:typed_data';

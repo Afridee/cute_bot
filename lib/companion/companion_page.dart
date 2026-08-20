@@ -53,6 +53,8 @@ class _CompanionPageState extends State<CompanionPage> {
                   padding: const EdgeInsets.all(12),
                   children: [
                     _ServiceCard(controller: c),
+                    const SizedBox(height: 12),
+                    _AndroidLinkCard(controller: c),
                     if (s != null) ...[
                       const SizedBox(height: 12),
                       _LinkCard(snapshot: s),
@@ -179,6 +181,81 @@ class _ServiceCard extends StatelessWidget {
                   FilledButton(
                     onPressed: c.restartService,
                     child: const Text('Start service'),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// CDM association (M2.5): once linked, Android watches for the bot and
+/// resurrects the foreground service when it comes into range — even from
+/// a dead process (API 31+).
+class _AndroidLinkCard extends StatelessWidget {
+  const _AndroidLinkCard({required this.controller});
+  final CompanionController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final link = controller.companionLink;
+    final state = link.state;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Android link (CDM)',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _Chip(
+                  label: state.associated
+                      ? 'Linked ${state.addresses.firstOrNull ?? ''}'
+                      : 'Not linked',
+                  ok: state.associated,
+                ),
+                if (state.associated && state.bondState != null)
+                  _Chip(
+                    label: 'Pairing: ${state.bondState}',
+                    ok: state.bondState == 'bonded',
+                  ),
+                _Chip(
+                  label: state.presenceSupported
+                      ? 'Wake on approach'
+                      : 'No wake-up (needs Android 12+)',
+                  ok: state.presenceSupported && state.associated,
+                ),
+              ],
+            ),
+            if (link.lastError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text('Error: ${link.lastError}',
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.error)),
+              ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: [
+                if (!state.associated)
+                  FilledButton.tonal(
+                    onPressed: link.associating ? null : link.associate,
+                    child: Text(link.associating
+                        ? 'Choosing…'
+                        : 'Link bot to Android'),
+                  )
+                else
+                  OutlinedButton(
+                    onPressed: link.disassociate,
+                    child: const Text('Remove link'),
                   ),
               ],
             ),

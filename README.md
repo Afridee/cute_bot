@@ -4,8 +4,15 @@ Flutter companion app for a small desk robot (mic + speaker + BLE; ESP32 later).
 All intelligence runs on the phone, fully offline. The bot is ears, a mouth,
 and a face.
 
-**Milestone status: M2 complete (agent bar). Awaiting the M2 human-bar test —
-kill/reboot survival on real phones. See `Docs/m2-testing-guide.md`.**
+**Milestone status: M2.5 (background survivability) complete (agent bar).
+M3 (LLM / GemmaBrain) not started. Awaiting the M2.5 human-bar tests —
+CDM resurrection, watchdog recovery, and notification checks on real phones
+(vivo included). See `Docs/m2.5-testing-guide.md`.**
+
+Milestone numbering follows `cursor-prompt-bot-companion.md` for M0–M2 and
+M3+. **M2.5** is background survivability (CDM, watchdog, notification
+polish) — work that extends M2 but isn't in the original brief. **M3** is
+still the LLM layer (`GemmaBrain`) and is next.
 
 ## Layout
 
@@ -18,7 +25,9 @@ kill/reboot survival on real phones. See `Docs/m2-testing-guide.md`.**
 | `lib/bot_simulator/` | Peripheral (GATT server) mode: a second Android phone standing in for the ESP32. |
 | `lib/companion/` | Central mode — the actual app. `bot_link.dart` (scan / auto-connect / MTU 517 / reconnect backoff / prioritized writes); since M2 the UI is a thin client over the foreground service. |
 | `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the M3 `BotBrain` interface, defined before any inference code), `fake_brain.dart` (canned responses at realistic delays), `brain_session.dart` (serialized conversation queue + recovery), `transcript.dart` (durable transcript behind a `KeyValueStore`). |
-| `lib/companion/service/` | M2 foreground service: `bot_service.dart` (the service isolate that owns BotLink + the brain), `service_ipc.dart` (UI↔service message schema), `task_storage.dart` (persistence backend). |
+| `lib/companion/service/` | M2 foreground service: `bot_service.dart` (the service isolate that owns BotLink + the brain), `service_ipc.dart` (UI↔service message schema), `task_storage.dart` (persistence backend), `notification_text.dart` (pure notification formatter, unit-tested). |
+| `lib/companion/companion_device_link.dart` | M2.5: Dart wrapper over the CDM MethodChannel — associate / disassociate / state for the "Android link" card. |
+| `android/app/src/main/kotlin/com/cutebot/cute_bot/` | M2.5 native layer: `CompanionLinkHandler` (CDM association + presence arming), `BotPresenceService` (wakes the service when the bot appears, API 31+), `BotServiceStarter` (the one shared restart path + unit-tested decision), `ServiceWatchdog` (15-min WorkManager safety net). |
 
 ## Toolchain
 
@@ -89,6 +98,27 @@ client — just renders `ServiceSnapshot`s pushed over the task channel and
 runs the permission flows the service isolate cannot (BLE authorize needs an
 Activity). `Docs/m2-testing-guide.md` walks the kill matrix.
 
+## M2.5 (background survivability) in one paragraph
+
+Our phone is the BLE *central*, so a dead app means nobody initiates the
+connection — the fix is CompanionDeviceManager: the user links the bot once
+("Link bot to Android" in the companion page, a CDM chooser filtered on the
+bot service UUID), the phone **bonds** during association (so it holds the
+IRK and can resolve the bot's rotating random address — recorded in
+`ble_protocol.dart`), and on Android 12+ the OS then watches for the bot
+itself and binds `BotPresenceService` when it appears, restarting the
+foreground service from a dead process. All background wake-ups
+(CDM presence, the 15-minute WorkManager watchdog) funnel through one
+native path, `BotServiceStarter`, which reuses flutter_foreground_task's
+own persisted "user started and didn't stop" status and RESTART action;
+when Android 12+ rejects the background start, it posts a tappable
+"reopen the app" notification instead of failing silently. The persistent
+notification is explicitly LOW importance (never buzzes) and always shows
+`connection · battery · brain` (e.g. `Connected · 82% · idle`), throttled;
+the battery-exemption dialog is offered exactly once per install and a
+refusal is remembered. On API 29–30 everything degrades gracefully: CDM
+association works but wake-on-approach does not exist there.
+
 ## Running the M0 human-bar test
 
 1. `flutter run` on phone #2 (the "bot"), pick **Bot Simulator**. It should
@@ -123,9 +153,18 @@ Activity). `Docs/m2-testing-guide.md` walks the kill matrix.
 - **Boot restart (M2):** `autoRunOnBoot` uses a BOOT_COMPLETED receiver.
   `connectedDevice` services are allowed to start from BOOT_COMPLETED on
   Android 15+, but Android 12+ background-start restrictions and OEM battery
-  managers can still block it; if the human-bar reboot test fails on a given
-  device, the fallback the brief asks for (a tappable notification instead of
-  silent failure) still needs building.
+  managers can still block it. Since M2.5 the watchdog covers this case: a
+  blocked restart produces the tappable "reopen the app" notification within
+  ~15 minutes instead of silent failure.
+- **CDM presence end-to-end (M2.5):** unverifiable without two phones — the
+  association chooser, the bonding handshake against the
+  `bluetooth_low_energy` simulator peripheral, and the appeared→resurrect
+  path are all human-bar. Plumbing is in and SDK-gated; see
+  `Docs/m2.5-testing-guide.md`.
+- **Notification timeout (M2.5):** skipped. `flutter_foreground_task` doesn't
+  expose `Notification.setTimeoutAfter`, and re-posting the service's own
+  foreground notification from outside would race the plugin's updates. The
+  watchdog covers the wedged-service case instead.
 - **BLE from the service isolate (M2):** verified by source inspection of
   `bluetooth_low_energy_android` 6.2.1 — scan/connect/notify are
   Context-only; only `authorize()`/`showAppSettings()` need an Activity, so

@@ -17,6 +17,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <!-- Battery-optimization exemption dialog (OEM killers, doze). -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- M2.5: CompanionDeviceManager. Presence observation (API 31+) lets
+         Android wake BotPresenceService when the associated bot comes into
+         BLE range; the FGS permission is the CDM exemption for starting the
+         foreground service from the background on Android 12+. -->
+    <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
+    <!-- CDM association is a hard requirement of the survivability design,
+         but required=false keeps API 29-30 phones without the feature
+         installable (association degrades, the app still works). -->
+    <uses-feature
+        android:name="android.software.companion_device_setup"
+        android:required="false" />
     <application
         android:label="cute_bot"
         android:name="${applicationName}"
@@ -51,6 +63,18 @@
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="connectedDevice"
             android:exported="false" />
+        <!-- M2.5: bound by the system (API 31+ only) when the CDM-associated
+             bot appears in BLE range; resurrects the foreground service.
+             Never bound on API 29-30 because presence observation is never
+             started there. -->
+        <service
+            android:name=".BotPresenceService"
+            android:exported="true"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
