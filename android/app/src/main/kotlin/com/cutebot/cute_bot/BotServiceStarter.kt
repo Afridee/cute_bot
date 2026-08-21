@@ -52,6 +52,8 @@ object BotServiceStarter {
      */
     private const val CHANNEL_ID = "cute_bot_service"
     private const val CHANNEL_NAME = "Cute Bot"
+    /** Must match CompanionController.startService(serviceId: 1007). */
+    const val FGS_NOTIFICATION_ID = 1007
     private const val REOPEN_NOTIFICATION_ID = 1008
 
     /** Sticky "the service died behind our back" marker (see below). */
@@ -114,11 +116,30 @@ object BotServiceStarter {
      * Restarts the bot service if (and only if) it should be running but is
      * not. Returns the decision that was made; a rejected start posts the
      * reopen notification and still returns [StartDecision.START].
+     *
+     * From `:listener` the work is forwarded to [DefaultProcessRelay] and
+     * this returns [StartDecision.START] meaning "restart requested" — the
+     * default process makes the real decision against a fresh lastAction.
      */
     fun ensureRunning(context: Context, reason: String): StartDecision {
+        // Prefs + sendData live in the default process. From :listener, hop
+        // so we don't act on a stale lastAction cache (user-stop would
+        // otherwise resurrect the bot) and so startForegroundService runs
+        // next to the FGS. The service itself has no android:process, so it
+        // always comes up in the default process.
+        if (CuteBotProcesses.isListenerProcess()) {
+            Log.i(TAG, "ensureRunning($reason): forwarding to default process")
+            DefaultProcessRelay.requestEnsureRunning(context, reason)
+            return StartDecision.START
+        }
+
         val lastAction = ForegroundServiceStatus.getData(context).action
         val decision = decide(lastAction, isBotServiceRunning(context))
         Log.i(TAG, "ensureRunning($reason): action=$lastAction -> $decision")
+        // Repeating alarm must stay armed the whole time the bot is wanted,
+        // including ALREADY_RUNNING — that is the clock that survives a
+        // SIGKILL. Cancel on a deliberate user stop.
+        KeepAliveAlarm.sync(context)
         if (decision != StartDecision.START) return decision
 
         // We are about to resurrect a service that something else killed —

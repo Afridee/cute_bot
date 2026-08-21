@@ -1,26 +1,26 @@
 // Notification listener: the strongest keep-alive anchor we have on
 // vivo/iQOO, plus the input for the "phone alerts on bot" feature.
 //
-// Keep-alive: once the user grants Notification access, system_server holds
-// a persistent bind to this service. When the OEM cleaner kills the process
-// ("single-cleaner" on the iQOO Neo 10 — it kills even a live FGS on swipe),
-// the system re-binds the listener, which restarts our process, and
-// onListenerConnected() revives the foreground service through the shared
-// BotServiceStarter path. This is exactly how Nothing X survives the same
-// cleaner (its NothingNotificationService is in enabled_notification_listeners
-// and system_server rebinds it after every kill). Not a hack: the honest
-// product reason for the access is the alert relay below.
+// Isolated in `:listener` (see AndroidManifest). Recents swipe on vivo
+// kills the task's default process (Home does not); the system bind to this
+// service can survive, or system_server rebinds us and the process comes
+// back. Either way onListenerConnected / FGS-notification removal calls
+// BotServiceStarter.ensureRunning, which hops into the default process and
+// restarts the FGS. A package FORCE_STOP (vivo single-cleaner sometimes
+// does this) kills every process including this one and cannot self-recover
+// until the user launches the app — that is Android, not a bug in this
+// path. Dummy ListenerBindPoke + requestRebind is the rebind-when-alive
+// path; we never disable this component (on vivo that revokes access).
 //
-// Alerts: qualifying phone notifications (WhatsApp, calls, ...) are forwarded
-// as a tiny "phoneAlert" event into the service isolate over the plugin's own
-// task-data channel (ForegroundService.sendData — same pipe the UI commands
-// use, no second IPC stack). The service isolate decides whether/how to
-// actuate the bot; if the service is not running, sendData is a no-op and the
-// event is simply dropped, which is fine — the ensureRunning call above is
-// the part that matters for survival.
+// Alerts: qualifying phone notifications are forwarded as a tiny
+// "phoneAlert" event into the FGS isolate. ForegroundService.sendData is
+// in-process, so :listener hops through DefaultProcessRelay. If the
+// service is not running the event is dropped, which is fine — the
+// ensureRunning call is the part that matters for survival.
 
 package com.cutebot.cute_bot
 
+import android.app.Application
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.ComponentName
@@ -33,7 +33,6 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import androidx.core.app.NotificationManagerCompat
-import com.pravera.flutter_foreground_task.service.ForegroundService
 
 class CuteBotNotificationListenerService : NotificationListenerService() {
 
@@ -48,7 +47,8 @@ class CuteBotNotificationListenerService : NotificationListenerService() {
         private const val ALERT_GAP_MS = 3_000L
 
         /** Live system bind held right now (per process — which is exactly
-         *  the scope [requestRebindIfNeeded] needs). */
+         *  the scope [requestRebindIfNeeded] needs). Always false in the
+         *  default process; the running-service check covers that. */
         @Volatile
         private var connected = false
 
@@ -89,11 +89,12 @@ class CuteBotNotificationListenerService : NotificationListenerService() {
          * is already in flight (grant, boot, package update).
          *
          * Called on every process start (CuteBotApplication) and after
-         * [onListenerDisconnected]. No-op when already bound or when
+         * [onListenerDisconnected]. No-op when already bound, when the
+         * default process can see `:listener` already running, or when
          * access is not granted.
          */
         fun requestRebindIfNeeded(context: Context) {
-            if (connected || healing) return
+            if (isBound(context) || healing) return
             if (!isEnabled(context)) return
             val app = context.applicationContext
             // Recover if a previous poke left this listener disabled.
@@ -102,6 +103,13 @@ class CuteBotNotificationListenerService : NotificationListenerService() {
             healHandler.removeCallbacksAndMessages(healToken)
             Log.i(TAG, "listener enabled but not bound; scheduling bind heal")
             postHeal(HEAL_INITIAL_DELAY_MS) { healBind(app, attempt = 0) }
+        }
+
+        /** Bound in this process, or (from default) visibly running in :listener. */
+        private fun isBound(context: Context): Boolean {
+            if (connected) return true
+            return !CuteBotProcesses.isListenerProcess() &&
+                CuteBotProcesses.isListenerServiceRunning(context)
         }
 
         private fun postHeal(delayMs: Long, action: () -> Unit) {
@@ -143,7 +151,7 @@ class CuteBotNotificationListenerService : NotificationListenerService() {
         }
 
         private fun healBind(context: Context, attempt: Int) {
-            if (connected) {
+            if (isBound(context)) {
                 finishHealing()
                 return
             }
@@ -154,7 +162,7 @@ class CuteBotNotificationListenerService : NotificationListenerService() {
 
             postHeal(HEAL_COMPONENT_GAP_MS) {
                 setPokeEnabled(context, false)
-                if (connected) {
+                if (isBound(context)) {
                     finishHealing()
                     return@postHeal
                 }
@@ -170,7 +178,7 @@ class CuteBotNotificationListenerService : NotificationListenerService() {
                     }
                 } else {
                     healing = false
-                    if (!connected) {
+                    if (!isBound(context)) {
                         Log.w(TAG, "listener still unbound after bind heal")
                     }
                 }
@@ -183,8 +191,8 @@ class CuteBotNotificationListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         // Fires on grant, on boot, after our component poke, and — when the
-        // OEM actually rebinds — right after a cleaner kill.
-        Log.i(TAG, "listener connected")
+        // OEM actually rebinds — right after a cleaner kill of :listener.
+        Log.i(TAG, "listener connected (process=${Application.getProcessName()})")
         connected = true
         finishHealing()
         lastEnsureAt = SystemClock.elapsedRealtime()
@@ -195,6 +203,17 @@ class CuteBotNotificationListenerService : NotificationListenerService() {
         Log.w(TAG, "listener disconnected")
         connected = false
         requestRebindIfNeeded(applicationContext)
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        // :listener survived a Recents swipe: the FGS (and its notification)
+        // is gone, but onListenerConnected will not fire again. Treat our
+        // own FGS shade entry disappearing as "restart the bot".
+        if (sbn.packageName != packageName) return
+        if (sbn.id != BotServiceStarter.FGS_NOTIFICATION_ID) return
+        Log.i(TAG, "FGS notification removed; ensuring bot service")
+        lastEnsureAt = SystemClock.elapsedRealtime()
+        BotServiceStarter.ensureRunning(applicationContext, "fgs-notification-removed")
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
@@ -213,12 +232,11 @@ class CuteBotNotificationListenerService : NotificationListenerService() {
 
         Log.i(TAG, "phone alert: ${sbn.packageName} (${sbn.notification.category})")
         // Same map schema as UiCommand in lib/companion/service/service_ipc.dart.
-        ForegroundService.sendData(
-            mapOf(
-                "cmd" to "phoneAlert",
-                "pkg" to sbn.packageName,
-                "category" to (sbn.notification.category ?: ""),
-            ))
+        DefaultProcessRelay.sendPhoneAlert(
+            applicationContext,
+            sbn.packageName,
+            sbn.notification.category ?: "",
+        )
     }
 
     /**

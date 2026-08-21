@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- BLE, legacy permissions for API 29-30 (project floor is 29). -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
@@ -17,6 +18,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <!-- Battery-optimization exemption dialog (OEM killers, doze). -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- KeepAliveAlarm: setExactAndAllowWhileIdle while the bot is wanted.
+         Denied → inexact fallback; a FORCE_STOP still cancels alarms. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- M2.5: CompanionDeviceManager. Presence observation (API 31+) lets
          Android wake BotPresenceService when the associated bot comes into
          BLE range; the FGS permission is the CDM exemption for starting the
@@ -86,22 +90,48 @@
             android:name=".ListenerBindPoke"
             android:enabled="false"
             android:exported="false" />
+        <!-- Default-process hop from :listener (phoneAlert + ensureRunning).
+             No android:process — must run next to the FGS. -->
+        <receiver
+            android:name=".DefaultProcessRelay"
+            android:exported="false" />
+        <!-- Nothing X-style keep-alive: AlarmManager wake while the bot is
+             wanted. Survives single-cleaner SIGKILL; not a FORCE_STOP.
+             See KeepAliveReceiver. -->
+        <receiver
+            android:name=".KeepAliveReceiver"
+            android:exported="false" />
         <!-- Notification listener: powers "phone alerts on bot" AND is the
-             strongest keep-alive anchor on vivo/iQOO — once the user grants
-             Notification access, system_server keeps a persistent bind and
-             re-binds after the OEM cleaner kills the process, reviving the
-             foreground service (same mechanism that makes Nothing X
-             swipe-proof on these phones). See
-             CuteBotNotificationListenerService. -->
+             strongest keep-alive anchor on vivo/iQOO. Isolated in :listener
+             so a Recents swipe (which kills the task's default process) can
+             leave the system bind intact; onListenerConnected / FGS-notif
+             removal then restarts the default-process FGS. A package
+             FORCE_STOP still kills every process and cannot self-recover.
+             See CuteBotNotificationListenerService. -->
         <service
             android:name=".CuteBotNotificationListenerService"
             android:exported="true"
             android:label="Cute Bot"
+            android:process=":listener"
+            android:stopWithTask="false"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+        <!-- WorkManager must not open its DB from :listener. Configuration
+             lives on CuteBotApplication; this removes the default initializer
+             so we don't double-init. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
