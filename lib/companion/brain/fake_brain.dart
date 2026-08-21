@@ -27,8 +27,9 @@ final class FakeBrain implements BotBrain {
   /// Stands in for per-token decode.
   final Duration tokenDelay;
 
-  /// Stands in for re-prefill cost: recovery replays the transcript, and
-  /// longer transcripts cost more. Applied per context entry on respond.
+  /// Stands in for re-prefill cost. FakeBrain sees the full transcript
+  /// (including user voice stubs); GemmaBrain seeds a rolling bot-text
+  /// window instead. Fine for tests. Applied per context entry on respond.
   final Duration prefillDelayPerEntry;
 
   bool _warm = false;

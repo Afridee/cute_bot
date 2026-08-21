@@ -3,7 +3,9 @@
 /// Lives in the foreground-service isolate next to BotLink. One long-lived
 /// chat, one serialized conversation (BrainSession already enforces that).
 /// Native audio in, native function-call tokens out — no STT stage, no
-/// regex-parsed tools.
+/// regex-parsed tools. Each turn clears history, seeds a short rolling
+/// text tail of recent bot replies, then submits the current WAV. Old
+/// audio clips are not kept in the token window.
 library;
 
 import 'dart:async';
@@ -13,6 +15,7 @@ import 'package:flutter_gemma/flutter_gemma.dart';
 import '../../shared/log.dart';
 import 'bot_brain.dart';
 import 'bot_tools.dart';
+import 'context_window.dart';
 import 'gemma_init.dart';
 import 'latency_trace.dart';
 import 'pcm16.dart';
@@ -32,11 +35,6 @@ const int kGemmaMaxTokens = 4096;
 /// Cap on generated tokens. A desk robot that monologues is not cute, and
 /// decode time is on the latency budget. M5 will tune this with the persona.
 const int kGemmaMaxOutputTokens = 80;
-
-/// How many persisted transcript lines to replay into a fresh chat after
-/// kill → re-warm. Oldest drop first. Audio + template + this must fit in
-/// [kGemmaMaxTokens].
-const int kReplayEntryCap = 16;
 
 /// Temporary system prompt. M5 moves this to `lib/companion/persona.dart`.
 const String kGemmaSystemInstruction =
@@ -62,7 +60,6 @@ final class GemmaBrain implements BotBrain {
   InferenceChat? _chat;
   bool _warm = false;
   bool _disposed = false;
-  bool _historySeeded = false;
   String _backend = 'gpu';
 
   /// 0–100 while the `.litertlm` is downloading; null otherwise.
@@ -119,7 +116,6 @@ final class GemmaBrain implements BotBrain {
     _chat = await _createChat();
     chatWatch.stop();
     _warmChatMs = chatWatch.elapsedMilliseconds;
-    _historySeeded = false;
     _warm = true;
     Log.i(_tag, 'chat open in ${_warmChatMs}ms');
     onChanged?.call();
@@ -194,7 +190,7 @@ final class GemmaBrain implements BotBrain {
 
     final totalWatch = Stopwatch()..start();
     try {
-      await _seedHistoryIfNeeded(ctx);
+      await _resetAndSeed(ctx);
 
       // WAV, not raw PCM. LiteRT-LM's conversation blob goes through
       // miniaudio, which rejects headerless samples (error -10).
@@ -303,34 +299,24 @@ final class GemmaBrain implements BotBrain {
     yield const Done();
   }
 
-  Future<void> _seedHistoryIfNeeded(ConversationContext ctx) async {
-    if (_historySeeded) return;
-    _historySeeded = true;
-    final prior = _replayable(ctx);
-    if (prior.isEmpty) return;
-    Log.i(_tag, 'seeding ${prior.length} transcript lines into a fresh chat');
+  /// Drop the previous turn's native audio (and Dart history), then seed
+  /// the rolling bot-text window. Called at the start of each [respond],
+  /// never mid tool-call loop.
+  ///
+  /// Path: [InferenceChat.clearHistory] (flutter_gemma 1.6.3). That closes
+  /// the LiteRT-LM conversation and [createSession]s a fresh one via the
+  /// chat's `sessionCreator` — same tools, systemInstruction, supportAudio.
+  /// The model stays loaded; we do not [createChat] per turn.
+  Future<void> _resetAndSeed(ConversationContext ctx) async {
+    final prior = rollingTextWindow(ctx.transcript);
+    await _chat!.clearHistory();
+    Log.i(_tag, 'cleared history, seeded ${prior.length} text lines');
     for (final entry in prior) {
       await _chat!.addQueryChunk(Message.text(
         text: entry.text,
         isUser: entry.role == TranscriptRole.user,
       ));
     }
-  }
-
-  /// Historical turns to replay into a fresh session. Drops the current
-  /// user placeholder BrainSession just appended (`(voice, 1.2 s)`) — that
-  /// turn is the audio clip, not text.
-  List<TranscriptEntry> _replayable(ConversationContext ctx) {
-    var entries = ctx.transcript;
-    if (entries.isEmpty) return const [];
-    final last = entries.last;
-    if (last.role == TranscriptRole.user && last.text.startsWith('(voice,')) {
-      entries = entries.sublist(0, entries.length - 1);
-    }
-    if (entries.length > kReplayEntryCap) {
-      entries = entries.sublist(entries.length - kReplayEntryCap);
-    }
-    return entries;
   }
 
   @override

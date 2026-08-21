@@ -103,8 +103,9 @@ real spoken clip — silence is a hostile input for a native-audio model.
 Swipe the companion out of recents. Speak again. The bot should still
 respond (service isolate owns the model). Force-stop / reboot still
 follow the M2.5 keep-alive paths; after resurrection the brain will
-**re-warm** (load + chat-create, no re-download) and replay the last
-16 transcript lines as text into the fresh session.
+**re-warm** (load + chat-create, no re-download). Live turns and
+post-restart turns both clear history and seed the last 16 bot
+transcript lines as text, then submit the current utterance as WAV.
 
 ## Fallback
 

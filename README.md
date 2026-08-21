@@ -161,7 +161,9 @@ litert-community bundle) once at warm-up via `flutter_gemma` +
 `LiteRtLmEngine`, then holds one `createChat` session for the process
 lifetime. Utterances arrive as 16 kHz PCM-16, get wrapped as a PCM WAV (LiteRT-LM's
 miniaudio decoder needs a container, not raw samples), and go in as
-`Message.withAudio` — no STT stage. Function calls come back as
+`Message.withAudio` — no STT stage. Each turn clears chat history and
+re-seeds a short text tail of recent bot replies; old audio clips are
+not kept in the 4096-token window. Function calls come back as
 structured `FunctionCallResponse` (Gemma 4 native `<|tool_call>` tokens,
 `ModelType.gemma4`); they surface as `ToolCall` events and a stub result
 is fed back so the model can finish the spoken turn. Full `BotActuator`
