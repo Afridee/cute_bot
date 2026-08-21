@@ -1,8 +1,9 @@
 // BLE central link to the bot (M1). Owns the whole connection lifecycle:
 //
 // - scan for the bot service UUID, connect to the first match
-// - negotiate MTU immediately on connect (request 517, accept less)
-// - discover GATT, subscribe to audio + telemetry notifications
+// - discover GATT, subscribe to audio + telemetry notifications, then
+//   negotiate MTU (CCCD writes after MTU 517 hang on some Android OEM stacks)
+// - auto-reconnect on drop with exponential backoff (rescan, because
 // - auto-reconnect on drop with exponential backoff (rescan, because
 //   Android peripherals rotate their random address, so a remembered
 //   handle can go stale)
@@ -39,6 +40,7 @@ String bleFailureMessage(String action, Object error) {
     19 => 'Bot closed the link. $retry',
     22 => 'Phone closed the link. $retry',
     _ when status != null => '$action failed (status $status). $retry',
+    _ when error is TimeoutException => 'Bot didn\'t confirm setup. $retry',
     _ => '$action failed. $retry',
   };
 }
@@ -171,6 +173,19 @@ final class BotLink extends ChangeNotifier {
   /// Used after stopScan on connect retry #2. Attempt 1 connects *while*
   /// still scanning so the controller can hear the next advertisement.
   static const Duration _postScanSettle = Duration(milliseconds: 400);
+
+  /// After MTU, Android often fires onServiceChanged and returns an empty
+  /// GATT cache if we discover immediately. Give the cache a beat.
+  static const Duration _postMtuSettle = Duration(milliseconds: 400);
+
+  /// After discoverServices, the stack updates the connection interval
+  /// (7.5 ms → 30 ms) and PHY (1M → 2M). A CCCD write issued during that
+  /// window is silently dropped; Android then ATT-times-out (~30 s) and
+  /// locally disconnects with status 22, which the plugin reports as 133.
+  static const Duration _postDiscoverSettle = Duration(milliseconds: 1500);
+
+  /// Fail a hung notify-enable before the stack's 30 s ATT timeout.
+  static const Duration _notifyTimeout = Duration(seconds: 8);
 
   /// Outbound queues. Control jumps ahead of audio, always.
   final Queue<_ControlWrite> _controlQueue = Queue();
@@ -393,32 +408,34 @@ final class BotLink extends ChangeNotifier {
     }
   }
 
-  /// Connected -> negotiate MTU, discover GATT, subscribe. Any failure here
+  /// Connected -> discover GATT, subscribe, then raise MTU. Any failure here
   /// tears the session down and goes through reconnect.
+  ///
+  /// CCCD (notify enable) is written *before* requestMTU. On this Vivo
+  /// Android 16 stack, writing the 2-byte CCCD after MTU 517 never gets
+  /// `onDescriptorWrite` and the plugin hangs until ATT timeout.
   Future<void> _configure() async {
     final peripheral = _peripheral!;
     state = BotLinkState.configuring;
     notifyListeners();
 
     try {
-      // MTU first, before any traffic (milestone requirement). Android 14+
-      // may auto-negotiate 517 and disregard this; the return value is the
-      // real negotiated MTU either way.
-      try {
-        mtu = await _central.requestMTU(peripheral, mtu: kPreferredMtu);
-        Log.i(_tag, 'negotiated MTU $mtu');
-      } catch (e) {
-        // Not fatal: proceed at whatever the default is; the chunker
-        // adapts frame size to `mtu`.
-        Log.w(_tag, 'requestMTU failed, staying at $mtu: ${bleLogDetail(e)}');
-      }
+      // Brief pause so an auto-MTU / onServiceChanged from Android 14+
+      // does not collide with our first discover.
+      await Future<void>.delayed(_postMtuSettle);
 
-      final services = await _central.discoverGATT(peripheral);
-      final service = services.firstWhere(
-        (s) => s.uuid == UUID.fromString(BotUuids.service),
-        orElse: () => throw StateError('bot service missing after connect'),
-      );
-      GATTCharacteristic find(String uuid) => service.characteristics
+      var services = await _central.discoverGATT(peripheral);
+      var service = _botService(services);
+      if (service == null) {
+        Log.w(_tag, 'bot service missing after discover, retrying');
+        await Future<void>.delayed(_postMtuSettle);
+        services = await _central.discoverGATT(peripheral);
+        service = _botService(services);
+      }
+      if (service == null) {
+        throw StateError('bot service missing after connect');
+      }
+      GATTCharacteristic find(String uuid) => service!.characteristics
           .firstWhere((c) => c.uuid == UUID.fromString(uuid),
               orElse: () =>
                   throw StateError('characteristic $uuid missing'));
@@ -427,11 +444,19 @@ final class BotLink extends ChangeNotifier {
       _controlChar = find(BotUuids.control);
       _telemetryChar = find(BotUuids.telemetry);
 
-      await _central.setCharacteristicNotifyState(
-          peripheral, _audioFromBotChar!,
-          state: true);
-      await _central.setCharacteristicNotifyState(peripheral, _telemetryChar!,
-          state: true);
+      Log.i(_tag, 'GATT discovered, waiting for link to settle');
+      await Future<void>.delayed(_postDiscoverSettle);
+
+      await _enableNotify(peripheral, _audioFromBotChar!, 'audio');
+      await _enableNotify(peripheral, _telemetryChar!, 'telemetry');
+
+      try {
+        mtu = await _central.requestMTU(peripheral, mtu: kPreferredMtu);
+        Log.i(_tag, 'negotiated MTU $mtu');
+      } catch (e) {
+        // Not fatal: the chunker adapts frame size to `mtu`.
+        Log.w(_tag, 'requestMTU failed, staying at $mtu: ${bleLogDetail(e)}');
+      }
 
       try {
         rssi = await _central.readRSSI(peripheral);
@@ -452,6 +477,33 @@ final class BotLink extends ChangeNotifier {
       } catch (_) {}
       _dropSession();
       _scheduleReconnect();
+    }
+  }
+
+  /// Enable notifications. If the CCCD write ACK never arrives but the
+  /// link still accepts GATT ops, continue — some OEM stacks complete ATT
+  /// and then drop the Java callback the plugin waits on.
+  Future<void> _enableNotify(
+    Peripheral peripheral,
+    GATTCharacteristic characteristic,
+    String name,
+  ) async {
+    Log.i(_tag, 'enabling $name notifications');
+    try {
+      await _central
+          .setCharacteristicNotifyState(peripheral, characteristic, state: true)
+          .timeout(_notifyTimeout);
+    } on TimeoutException {
+      Log.w(_tag, '$name notify ACK timed out, probing link');
+      try {
+        rssi = await _central
+            .readRSSI(peripheral)
+            .timeout(const Duration(seconds: 2));
+        Log.w(_tag, '$name notify proceeding without ACK (rssi $rssi)');
+      } on Object catch (e) {
+        Log.e(_tag, '$name notify stuck (${bleLogDetail(e)})');
+        throw TimeoutException('$name notify enable timed out');
+      }
     }
   }
 
@@ -610,6 +662,13 @@ final class BotLink extends ChangeNotifier {
   }
 
   // --- teardown ---
+
+  GATTService? _botService(List<GATTService> services) {
+    for (final s in services) {
+      if (s.uuid == UUID.fromString(BotUuids.service)) return s;
+    }
+    return null;
+  }
 
   String _shortId(String id) =>
       id.length > 8 ? id.substring(id.length - 8) : id;

@@ -3,6 +3,7 @@
 
 import 'package:cute_bot/companion/bot_link.dart';
 import 'package:cute_bot/companion/brain/brain_session.dart';
+import 'package:cute_bot/companion/brain/latency_trace.dart';
 import 'package:cute_bot/companion/brain/transcript.dart';
 import 'package:cute_bot/companion/service/service_ipc.dart';
 import 'package:cute_bot/shared/ble_protocol.dart';
@@ -99,6 +100,16 @@ void main() {
           linkError: null,
           brainState: BrainSessionState.responding,
           brainError: null,
+          brainKind: 'Gemma 4 E2B',
+          downloadPercent: 42,
+          lastLatency: const LatencyTrace(
+            submitMs: 80,
+            firstTokenMs: 900,
+            decodeMs: 400,
+            totalMs: 1300,
+            backend: 'gpu',
+            firstTokenText: 'Hi',
+          ),
           replayedEntries: 4,
           droppedUtterances: 1,
           responseText: 'Beep',
@@ -137,6 +148,10 @@ void main() {
         expect(s.botId, 'abcd1234');
         expect(s.rssi, -55);
         expect(s.brainState, BrainSessionState.responding);
+        expect(s.brainKind, 'Gemma 4 E2B');
+        expect(s.downloadPercent, 42);
+        expect(s.lastLatency!.firstTokenMs, 900);
+        expect(s.lastLatency!.backend, 'gpu');
         expect(s.replayedEntries, 4);
         expect(s.droppedUtterances, 1);
         expect(s.responseText, 'Beep');
@@ -164,6 +179,9 @@ void main() {
       expect(minimal, isNotNull);
       expect(minimal!.linkState, BotLinkState.idle);
       expect(minimal.brainState, BrainSessionState.cold);
+      expect(minimal.brainKind, 'unknown');
+      expect(minimal.downloadPercent, isNull);
+      expect(minimal.lastLatency, isNull);
       expect(minimal.mtu, 23);
       expect(minimal.lastReceive, isNull);
       expect(minimal.transcript, isEmpty);

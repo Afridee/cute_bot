@@ -7,11 +7,14 @@
 #include "generated_plugin_registrant.h"
 
 #include <bluetooth_low_energy_windows/bluetooth_low_energy_windows_plugin_c_api.h>
+#include <flutter_gemma/flutter_gemma_plugin.h>
 #include <record_windows/record_windows_plugin_c_api.h>
 
 void RegisterPlugins(flutter::PluginRegistry* registry) {
   BluetoothLowEnergyWindowsPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("BluetoothLowEnergyWindowsPluginCApi"));
+  FlutterGemmaPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("FlutterGemmaPlugin"));
   RecordWindowsPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("RecordWindowsPluginCApi"));
 }

@@ -119,6 +119,38 @@ void main() {
           isA<GetBatteryCommand>());
     });
 
+    test('show_text round-trips UTF-8 and the final flag', () {
+      final utf8Bytes = Uint8List.fromList([
+        0x68, 0x69, 0x20, // "hi "
+        0xF0, 0x9F, 0xA4, 0x96, // U+1F916 robot
+      ]);
+      final decoded = BotMessage.decode(ShowTextCommand(
+        sequence: 5,
+        utf8Text: utf8Bytes,
+        isFinal: false,
+      ).encode()) as ShowTextCommand;
+      expect(decoded.sequence, 5);
+      expect(decoded.isFinal, isFalse);
+      expect(decoded.utf8Text, utf8Bytes);
+      expect(decoded.commandId, ControlCommandId.showText);
+
+      final done = BotMessage.decode(ShowTextCommand(
+        sequence: 6,
+        utf8Text: utf8Bytes,
+      ).encode()) as ShowTextCommand;
+      expect(done.isFinal, isTrue);
+    });
+
+    test('show_text with empty payload is legal', () {
+      final decoded = BotMessage.decode(ShowTextCommand(
+        sequence: 7,
+        utf8Text: Uint8List(0),
+        isFinal: true,
+      ).encode()) as ShowTextCommand;
+      expect(decoded.utf8Text, isEmpty);
+      expect(decoded.isFinal, isTrue);
+    });
+
     test('malformed control frames are rejected', () {
       // No command id.
       expect(() => BotMessage.decode(Uint8List.fromList([MessageType.control, 0, 0, 0])),
@@ -137,6 +169,11 @@ void main() {
       expect(
           () => BotMessage.decode(Uint8List.fromList(
               [MessageType.control, 0, 0, 0, ControlCommandId.setLed, 1, 2, 3, 9])),
+          throwsA(isA<ProtocolException>()));
+      // show_text with missing flags byte.
+      expect(
+          () => BotMessage.decode(Uint8List.fromList(
+              [MessageType.control, 0, 0, 0, ControlCommandId.showText])),
           throwsA(isA<ProtocolException>()));
     });
   });

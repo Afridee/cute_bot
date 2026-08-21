@@ -10,6 +10,7 @@
 library;
 
 import '../brain/brain_session.dart';
+import '../brain/latency_trace.dart';
 import '../brain/transcript.dart';
 import '../../shared/ble_protocol.dart';
 import '../bot_link.dart';
@@ -249,6 +250,9 @@ final class ServiceSnapshot {
     required this.linkError,
     required this.brainState,
     required this.brainError,
+    required this.brainKind,
+    this.downloadPercent,
+    this.lastLatency,
     required this.replayedEntries,
     required this.droppedUtterances,
     required this.responseText,
@@ -280,6 +284,9 @@ final class ServiceSnapshot {
   // Brain
   final BrainSessionState brainState;
   final String? brainError;
+  final String brainKind;
+  final int? downloadPercent;
+  final LatencyTrace? lastLatency;
   final int replayedEntries;
   final int droppedUtterances;
   final String responseText;
@@ -318,6 +325,9 @@ final class ServiceSnapshot {
         'linkError': linkError,
         'brain': brainState.name,
         'brainError': brainError,
+        'brainKind': brainKind,
+        'dlPct': downloadPercent,
+        'latency': lastLatency?.toMap(),
         'replayed': replayedEntries,
         'dropped': droppedUtterances,
         'responseText': responseText,
@@ -353,6 +363,10 @@ final class ServiceSnapshot {
           BrainSessionState.values, raw['brain'], BrainSessionState.cold),
       brainError:
           raw['brainError'] is String ? raw['brainError'] as String : null,
+      brainKind:
+          raw['brainKind'] is String ? raw['brainKind'] as String : 'unknown',
+      downloadPercent: _asInt(raw['dlPct']),
+      lastLatency: LatencyTrace.fromMap(raw['latency']),
       replayedEntries: _asInt(raw['replayed']) ?? 0,
       droppedUtterances: _asInt(raw['dropped']) ?? 0,
       responseText:

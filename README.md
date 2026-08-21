@@ -4,17 +4,17 @@ Flutter companion app for a small desk robot (mic + speaker + BLE; ESP32 later).
 All intelligence runs on the phone, fully offline. The bot is ears, a mouth,
 and a face.
 
-**Milestone status: M2.5 (background survivability) complete (agent bar).
-M3 (LLM / GemmaBrain) not started. Awaiting the M2.5 human-bar tests on
-real phones — CDM resurrection, Recents-swipe / OEM-cleaner recovery
-(vivo/iQOO, with Notification access), the 1-minute keep-alive alarm,
-watchdog, phone alerts, and notification silence. See
+**Milestone status: M3 (LLM / GemmaBrain) complete (agent bar).
+Awaiting the M3 human-bar tests on a real 8GB+ phone — first-launch
+model download, a spoken utterance through Gemma 4 native audio,
+latency breakdown (submit / ttf / decode), and tool-call LEDs. See
+`Docs/m3-testing-guide.md`. M2.5 keep-alive tests remain in
 `Docs/m2.5-testing-guide.md`.**
 
 Milestone numbering follows `cursor-prompt-bot-companion.md` for M0–M2 and
 M3+. **M2.5** is background survivability (CDM, watchdog, notification
-listener, OEM care) — work that extends M2 but isn't in the original brief.
-**M3** is still the LLM layer (`GemmaBrain`) and is next.
+listener, OEM care). **M3** is the LLM layer (`GemmaBrain`). **M4** is
+tools-as-the-bot's-body (full `BotActuator` + timer persistence).
 
 ## Layout
 
@@ -26,7 +26,7 @@ listener, OEM care) — work that extends M2 but isn't in the original brief.
 | `lib/shared/log.dart` | Single logging channel with levels. `adb logcat | grep CuteBot`. |
 | `lib/bot_simulator/` | Peripheral (GATT server) mode: a second Android phone standing in for the ESP32. |
 | `lib/companion/` | Central mode — the actual app. `bot_link.dart` (scan / auto-connect / MTU 517 / reconnect backoff / prioritized writes); since M2 the UI is a thin client over the foreground service. |
-| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the M3 `BotBrain` interface, defined before any inference code), `fake_brain.dart` (canned responses at realistic delays), `brain_session.dart` (serialized conversation queue + recovery), `transcript.dart` (durable transcript behind a `KeyValueStore`). |
+| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the `BotBrain` interface), `fake_brain.dart` (canned stand-in), `gemma_brain.dart` (M3: Gemma 4 E2B, native audio + function calling), `brain_session.dart` (serialized conversation queue + recovery), `transcript.dart` (durable transcript), `pcm16.dart` / `latency_trace.dart` / `bot_tools.dart` (pure helpers). |
 | `lib/companion/service/` | M2 foreground service: `bot_service.dart` (the service isolate that owns BotLink + the brain + phone-alert actuation), `service_ipc.dart` (UI↔service message schema, including `phoneAlert`), `task_storage.dart` (persistence backend), `notification_text.dart` (pure notification formatter, unit-tested). |
 | `lib/companion/companion_device_link.dart` | M2.5: Dart wrapper over the CDM MethodChannel — associate / disassociate / state for the "Android link" card. |
 | `lib/companion/oem_care.dart` | M2.5: Dart face of OEM diagnostics — manufacturer/brand, sticky "service died behind our back" marker, Notification-access grant. |
@@ -35,10 +35,14 @@ listener, OEM care) — work that extends M2 but isn't in the original brief.
 
 ## Toolchain
 
-- Flutter **3.41.7** (Dart 3.11.5), managed by FVM: `~/fvm/versions/stable/bin/flutter`.
-  The Flutter 3.10.6 on PATH (`~/Developer/flutter`) is stale — don't use it.
-- Android only. minSdk 29 (Android 10). BLE does not work on emulators; use
-  two physical phones.
+- Flutter **3.44.9** (Dart 3.12.2), managed by FVM: `fvm flutter …`.
+  Pinned in `.fvmrc`. `flutter_gemma` 1.0+ needs Dart ≥ 3.12 / Flutter ≥ 3.44;
+  the previous 3.41.7 pin could not resolve it. The Flutter 3.10.6 on PATH
+  (`~/Developer/flutter`) is stale — don't use it.
+- Android only. minSdk **30** (Android 11). `libLiteRtLm` needs API 30+
+  Bionic syscalls; the original brief's API 29 floor cannot load the model.
+  arm64-v8a only (LiteRT-LM FFI). BLE does not work on emulators; use two
+  physical phones. Companion wants 8GB+ RAM.
 
 ## Dependencies (and why)
 
@@ -55,8 +59,14 @@ listener, OEM care) — work that extends M2 but isn't in the original brief.
   automatic plugin registration, two-way isolate messaging, START_STICKY,
   `allowAutoRestart` (system-kill recovery), `autoRunOnBoot` (BOOT_COMPLETED
   receiver), battery-optimization helpers, and a SharedPreferences-backed
-  store used for transcript persistence. (11.0.0 exists but needs a newer
-  Dart than 3.11.5; 10.0.0 has every API M2 uses.)
+  store used for transcript persistence. (11.0.0 exists but we stayed on
+  10.0.0 — every API M2 uses is here.)
+- `flutter_gemma` 1.6.3 + `flutter_gemma_litertlm` 1.5.2 — M3. The brief
+  named 1.5.2; `flutter_gemma_litertlm` 1.5.2 depends on `flutter_gemma
+  ^1.6.1`, so the compatible pair is 1.6.3 + 1.5.2. `ModelType.gemma4`,
+  native audio (`Message.withAudio`), and native function calling
+  (`createChat` + `FunctionCallResponse`) are on this line. Initialize with
+  `LiteRtLmEngine()` in the **service isolate**, not the UI isolate.
 
 ## Protocol summary (v1)
 
@@ -89,7 +99,8 @@ the two-phone test.
 The bot lives in an Android foreground service (`foregroundServiceType=
 connectedDevice`), in its own Flutter engine/isolate. That isolate — not the
 UI — owns the BLE central link, an `UtteranceReassembler`, and a
-`BrainSession` wrapping a `FakeBrain` behind the M3 `BotBrain` interface, so
+`BrainSession` wrapping a `GemmaBrain` (or `FakeBrain` behind
+`--dart-define=CUTEBOT_FAKE_BRAIN=true`) behind the `BotBrain` interface, so
 swiping the app out of recents changes nothing the bot can see. Utterances
 arriving off the radio flow straight into a strictly serialized conversation
 queue (the LiteRT-LM one-conversation rule, enforced from day one); every
@@ -142,6 +153,23 @@ safety net. The persistent notification is LOW importance (never buzzes)
 and always shows `connection · battery · brain` (e.g.
 `Connected · 82% · idle`), throttled; the battery-exemption dialog is
 offered exactly once per install and a refusal is remembered.
+
+## M3 in one paragraph
+
+The service isolate loads Gemma 4 E2B (`.litertlm`, ~2.6 GB, ungated
+litert-community bundle) once at warm-up via `flutter_gemma` +
+`LiteRtLmEngine`, then holds one `createChat` session for the process
+lifetime. Utterances arrive as 16 kHz PCM-16, get wrapped as a PCM WAV (LiteRT-LM's
+miniaudio decoder needs a container, not raw samples), and go in as
+`Message.withAudio` — no STT stage. Function calls come back as
+structured `FunctionCallResponse` (Gemma 4 native `<|tool_call>` tokens,
+`ModelType.gemma4`); they surface as `ToolCall` events and a stub result
+is fed back so the model can finish the spoken turn. Full `BotActuator`
+dispatch, timer persistence, and battery-into-the-brain are M4. Each turn
+logs a latency breakdown (`submit` / `ttf` / `decode` / `total`); **ttf**
+is the M3 proxy for the 2 s E2B budget — TTS + BLE playback are M5 and
+are not in that number yet. `Docs/m3-testing-guide.md` walks the on-phone
+test.
 
 ## Running the M0 human-bar test
 
@@ -212,3 +240,24 @@ offered exactly once per install and a refusal is remembered.
   real hardware.
 - iOS is deliberately unsupported (long-lived foreground service + multi-GB
   model has no iOS equivalent).
+- **Native audio on the E2B `.litertlm` (M3):** flutter_gemma 1.6.3 exposes
+  `supportAudio` + `Message.withAudio` with no model-version gate. Audio
+  bytes must be a PCM WAV — raw PCM16 fails native start-stream with
+  miniaudio error -10 (`MA_INVALID_FILE`). The remaining risk is whether
+  *this* `gemma-4-E2B-it.litertlm` file actually bundles the audio encoder.
+  If a spoken clip produces a generic "I can't hear you" / empty reply, the
+  fallback is `flutter_gemma_speech` (STT stage), which the brief named.
+  The audio *encoder* is loaded on CPU (plugin default). Pinning it to GPU
+  made every `engine_create` fail, including the CPU text fallback,
+  because the FFI retry only changes the text backend.
+- **`openChat` rejects native audio** on `.litertlm`: concurrent
+  `openSession` handles replay history as text only. We use `createChat`
+  → `createSession`. LiteRT-LM's `FfiInferenceModel.createChat` still
+  forwards `tools` (the base `InferenceModel.createChat` in flutter_gemma
+  1.6.3 does not). Flagged in `gemma_brain.dart`.
+- **Latency budget (M3):** ttf (end of speech → first token) is measured;
+  first audio out of the bot speaker is not, because TTS is M5. Report the
+  ttf number from the human bar before judging the 2 s / 3.5 s ceiling.
+- **minSdk 30 / Flutter 3.44.9:** hard requirements of `libLiteRtLm` and
+  `flutter_gemma` 1.0+. Android 10 phones and the old 3.41.7 pin cannot
+  run M3.
