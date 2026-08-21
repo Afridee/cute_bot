@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 version: 1.0.0+1
 
 environment:
-  sdk: ^3.11.5
+  sdk: ^3.12.0
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -47,6 +47,16 @@ dependencies:
   # Simulator real-time raw PCM16 playback (approved in M0).
   flutter_pcm_sound: ^3.3.3
   flutter_foreground_task: ^10.0.0
+
+  # M3: on-device Gemma 4. Named in the brief as flutter_gemma 1.5.x
+  # (1.5.2) + the LiteRT-LM engine add-on. Re-verified Aug 2026:
+  # flutter_gemma_litertlm 1.5.2 depends on flutter_gemma ^1.6.1, so the
+  # compatible pair is flutter_gemma 1.6.3 + litertlm 1.5.2. 1.0+ needs
+  # Dart >= 3.12 / Flutter >= 3.44, which is why the project pin moved
+  # off 3.41.7. ModelType.gemma4, native audio, and function calling are
+  # on this line.
+  flutter_gemma: 1.6.3
+  flutter_gemma_litertlm: 1.5.2
 
 dev_dependencies:
   flutter_test:

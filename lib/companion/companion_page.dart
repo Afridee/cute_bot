@@ -413,7 +413,7 @@ class _BrainCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Brain (FakeBrain — real model lands in M3)',
+            Text('Brain (${s.brainKind})',
                 style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
             Wrap(
@@ -430,6 +430,13 @@ class _BrainCard extends StatelessWidget {
                   _Chip(label: '${s.droppedUtterances} dropped', ok: false),
               ],
             ),
+            if (s.downloadPercent != null) ...[
+              const SizedBox(height: 8),
+              Text('Downloading model ${s.downloadPercent}%'),
+              LinearProgressIndicator(
+                value: s.downloadPercent! / 100,
+              ),
+            ],
             if (s.brainError != null)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -442,6 +449,14 @@ class _BrainCard extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 8),
                 child: Text('“${s.responseText}…”',
                     style: Theme.of(context).textTheme.bodyMedium),
+              ),
+            if (s.lastLatency != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  s.lastLatency!.summary,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
               ),
             const SizedBox(height: 8),
             Wrap(

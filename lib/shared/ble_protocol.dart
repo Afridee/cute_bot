@@ -11,6 +11,13 @@
 /// - AUDIO PLANE (codec, sample rate, chunk sizing — see [AudioWireFormat]
 ///   and `adpcm.dart`): PROVISIONAL until the M1 bandwidth gate passes.
 ///
+/// ADDENDUM (M3 caption, additive): [ControlCommandId.showText] (0x05)
+/// carries a UTF-8 caption on the existing control characteristic. UUIDs,
+/// header, and existing command encodings are unchanged. Unknown-command
+/// receivers (old simulator / ESP32) still reject 0x05; rebuild both
+/// phones. This is the stand-in for M5 TTS — the simulator has a screen,
+/// the desk robot will not keep this as a product surface.
+///
 /// ## Roles
 ///
 /// The bot (simulator or ESP32) is the BLE *peripheral* and GATT server.
@@ -308,6 +315,15 @@ abstract final class ControlCommandId {
   static const int wiggle = 0x02;
   static const int playSound = 0x03;
   static const int getBattery = 0x04;
+
+  /// UTF-8 caption for the simulator screen (M3 stand-in for TTS).
+  static const int showText = 0x05;
+}
+
+/// Flag bits for [ShowTextCommand] args byte 0.
+abstract final class ShowTextFlags {
+  /// This payload is the finished reply; commit the bubble.
+  static const int isFinal = 0x01;
 }
 
 /// LED animation patterns for [SetLedCommand].
@@ -384,6 +400,7 @@ sealed class ControlMessage extends BotMessage {
       ControlCommandId.wiggle => WiggleCommand(sequence: seq),
       ControlCommandId.playSound => PlaySoundCommand._decodeArgs(seq, args),
       ControlCommandId.getBattery => GetBatteryCommand(sequence: seq),
+      ControlCommandId.showText => ShowTextCommand._decodeArgs(seq, args),
       _ => throw ProtocolException(
           'unknown control command 0x${payload[0].toRadixString(16)}'),
     };
@@ -465,6 +482,43 @@ final class GetBatteryCommand extends ControlMessage {
 
   @override
   Uint8List encodeArgs() => Uint8List(0);
+}
+
+/// Phone -> bot caption. Args: [flags u8][utf-8 text…].
+///
+/// Payload is raw UTF-8 so this file stays `dart:typed_data` only. Empty
+/// text is legal (a final with no bytes just commits whatever was streaming).
+final class ShowTextCommand extends ControlMessage {
+  const ShowTextCommand({
+    required super.sequence,
+    required this.utf8Text,
+    this.isFinal = true,
+  });
+
+  final Uint8List utf8Text;
+  final bool isFinal;
+
+  @override
+  int get commandId => ControlCommandId.showText;
+
+  @override
+  Uint8List encodeArgs() {
+    final args = Uint8List(1 + utf8Text.length);
+    args[0] = isFinal ? ShowTextFlags.isFinal : 0;
+    args.setRange(1, args.length, utf8Text);
+    return args;
+  }
+
+  static ShowTextCommand _decodeArgs(int sequence, Uint8List args) {
+    if (args.isEmpty) {
+      throw ProtocolException('show_text needs a flags byte');
+    }
+    return ShowTextCommand(
+      sequence: sequence,
+      isFinal: args[0] & ShowTextFlags.isFinal != 0,
+      utf8Text: Uint8List.fromList(args.sublist(1)),
+    );
+  }
 }
 
 /// Telemetry kinds (first payload byte of a telemetry frame).

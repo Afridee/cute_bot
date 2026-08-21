@@ -22,11 +22,18 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.cutebot.cute_bot"
-        // Project floor is Android 10 (API 29) per the product brief.
-        minSdk = 29
+        // Project floor is Android 11 (API 30). flutter_gemma_litertlm's
+        // libLiteRtLm needs API 30+ Bionic syscalls (pthread_cond_clockwait).
+        // The original brief said API 29; this is a hard engine constraint.
+        minSdk = 30
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // .litertlm FFI is arm64-v8a only. Restrict so Play doesn't offer
+        // a broken APK to 32-bit / x86 devices.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildTypes {

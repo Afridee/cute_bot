@@ -50,6 +50,8 @@ class _SimulatorPageState extends State<SimulatorPage> {
                     const SizedBox(height: 12),
                     _LedCard(controller: c),
                     const SizedBox(height: 12),
+                    _ConversationCard(controller: c),
+                    const SizedBox(height: 12),
                     _AudioCard(controller: c),
                     const SizedBox(height: 12),
                     _ActivityCard(controller: c),
@@ -198,6 +200,65 @@ class _LedCard extends StatelessWidget {
                 ],
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ConversationCard extends StatelessWidget {
+  const _ConversationCard({required this.controller});
+  final SimulatorController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = controller.conversation;
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Conversation', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 4),
+            if (lines.isEmpty)
+              Text(
+                'Hold to talk, then wait for a reply. Captions come over BLE '
+                'until TTS (M5) speaks them.',
+                style: theme.textTheme.bodySmall,
+              )
+            else
+              for (final line in lines)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Align(
+                    alignment: line.role == SimulatorChatRole.user
+                        ? Alignment.centerRight
+                        : Alignment.centerLeft,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 320),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: line.role == SimulatorChatRole.user
+                              ? theme.colorScheme.primaryContainer
+                              : theme.colorScheme.secondaryContainer,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                          child: Text(
+                            '${line.role == SimulatorChatRole.user ? 'You' : 'Bot'}'
+                            '${line.streaming ? ' …' : ''}\n${line.text}',
+                            style: theme.textTheme.bodyMedium,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
           ],
         ),
       ),

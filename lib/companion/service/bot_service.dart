@@ -14,6 +14,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -26,6 +27,7 @@ import '../bot_link.dart';
 import '../brain/bot_brain.dart';
 import '../brain/brain_session.dart';
 import '../brain/fake_brain.dart';
+import '../brain/gemma_brain.dart';
 import '../brain/transcript.dart';
 import 'notification_text.dart';
 import 'service_ipc.dart';
@@ -44,6 +46,7 @@ final class BotTaskHandler extends TaskHandler {
   BotLink? _link;
   BrainSession? _session;
   TranscriptStore? _transcript;
+  GemmaBrain? _gemma;
   late UtteranceReassembler _reassembler;
   final List<StreamSubscription> _subscriptions = [];
   final SequenceCounter _controlSeq = SequenceCounter();
@@ -88,6 +91,10 @@ final class BotTaskHandler extends TaskHandler {
   Timer? _pendingSnapshot;
 
   BrainSessionState? _lastExpressedBrainState;
+  BrainSessionState? _lastCaptionBrainState;
+  DateTime _lastCaptionAt = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _pendingCaption;
+  static const Duration _minCaptionGap = Duration(milliseconds: 200);
 
   // Notification throttle: change-only, capped at one update per gap with a
   // trailing update so the final state always lands (same pattern as
@@ -106,8 +113,20 @@ final class BotTaskHandler extends TaskHandler {
     _logActivity('Service started (${starter.name})');
 
     _transcript = TranscriptStore(const TaskKeyValueStore());
+    // CUTEBOT_FAKE_BRAIN=true keeps M2's canned brain for one-phone tests
+    // that must not download 2.6 GB. Default is Gemma 4 E2B.
+    const useFake = bool.fromEnvironment('CUTEBOT_FAKE_BRAIN');
+    final BotBrain brain;
+    if (useFake) {
+      Log.i(_tag, 'brain: FakeBrain (CUTEBOT_FAKE_BRAIN)');
+      brain = FakeBrain();
+    } else {
+      _gemma = GemmaBrain(onChanged: () => _pushSnapshot());
+      brain = _gemma!;
+      Log.i(_tag, 'brain: Gemma 4 E2B');
+    }
     _session = BrainSession(
-      brain: FakeBrain(),
+      brain: brain,
       transcript: _transcript!,
       onToolCall: _onToolCall,
     )..addListener(_onBrainChanged);
@@ -160,6 +179,7 @@ final class BotTaskHandler extends TaskHandler {
     Log.w(_tag, 'service destroyed (timeout: $isTimeout)');
     _pendingSnapshot?.cancel();
     _pendingNotification?.cancel();
+    _pendingCaption?.cancel();
     _phoneAlertRestore?.cancel();
     for (final sub in _subscriptions) {
       unawaited(sub.cancel());
@@ -302,8 +322,76 @@ final class BotTaskHandler extends TaskHandler {
       _lastExpressedBrainState = session.state;
       _expressBrainState(session.state, hadError: session.lastError != null);
     }
+    _pushCaption(session);
     _updateNotification();
     _pushSnapshot();
+  }
+
+  /// M3 stand-in for TTS: stream the reply as a caption the simulator can
+  /// show. Frame header + command + flags are 6 bytes; ATT write is MTU-3.
+  void _pushCaption(BrainSession session) {
+    if (session.state == BrainSessionState.responding &&
+        session.responseText.isNotEmpty) {
+      _sendCaption(session.responseText, isFinal: false);
+    }
+    if (_lastCaptionBrainState == BrainSessionState.responding &&
+        session.state == BrainSessionState.ready &&
+        session.lastResponseText.isNotEmpty) {
+      _pendingCaption?.cancel();
+      _pendingCaption = null;
+      _sendCaption(session.lastResponseText, isFinal: true, force: true);
+    }
+    _lastCaptionBrainState = session.state;
+  }
+
+  void _sendCaption(String text, {required bool isFinal, bool force = false}) {
+    if (!isFinal && !force) {
+      final now = DateTime.now();
+      final elapsed = now.difference(_lastCaptionAt);
+      if (elapsed < _minCaptionGap) {
+        _pendingCaption ??= Timer(_minCaptionGap - elapsed, () {
+          _pendingCaption = null;
+          final session = _session;
+          if (session != null &&
+              session.state == BrainSessionState.responding &&
+              session.responseText.isNotEmpty) {
+            _sendCaption(session.responseText, isFinal: false, force: true);
+          }
+        });
+        return;
+      }
+    }
+    _pendingCaption?.cancel();
+    _pendingCaption = null;
+    _lastCaptionAt = DateTime.now();
+
+    final link = _link;
+    if (link == null || link.state != BotLinkState.ready) return;
+    // header(4) + cmd(1) + flags(1) + ATT(3) → remaining bytes for UTF-8.
+    final maxUtf8 = (link.mtu - 9).clamp(16, 500);
+    final utf8Text = _utf8Truncated(text, maxUtf8);
+    _sendControl(
+      ShowTextCommand(
+        sequence: _controlSeq.next(),
+        utf8Text: utf8Text,
+        isFinal: isFinal,
+      ),
+      isFinal ? 'caption' : 'caption…',
+      quiet: !isFinal,
+    );
+  }
+
+  static Uint8List _utf8Truncated(String text, int maxBytes) {
+    final bytes = utf8.encode(text);
+    if (bytes.length <= maxBytes) return Uint8List.fromList(bytes);
+    var end = maxBytes;
+    while (end > 0 && (bytes[end - 1] & 0xC0) == 0x80) {
+      end--;
+    }
+    if (end > 0 && (bytes[end - 1] & 0x80) != 0) {
+      end--;
+    }
+    return Uint8List.fromList(bytes.sublist(0, end));
   }
 
   /// Shows the brain's state on the bot's body. This is the M2 human bar:
@@ -337,20 +425,20 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   /// Tool calls from the brain, mapped onto BLE control writes. Full tool
-  /// dispatch (BotActuator) is M4; this covers what FakeBrain emits.
+  /// dispatch (BotActuator) is M4; this covers the body-language tools so
+  /// Gemma's `set_led` / `wiggle` / `play_sound` are visible on the bot.
   void _onToolCall(ToolCall call) {
     _logActivity('Tool call: $call');
     switch (call.name) {
       case 'set_led':
+        final rgb = _ledColor(call.arguments['color']);
         _sendControl(
             SetLedCommand(
               sequence: _controlSeq.next(),
-              red: 255,
-              green: 105,
-              blue: 180, // FakeBrain only knows pink
-              pattern: call.arguments['pattern'] == 'blink'
-                  ? LedPattern.blink
-                  : LedPattern.solid,
+              red: rgb.$1,
+              green: rgb.$2,
+              blue: rgb.$3,
+              pattern: _ledPattern(call.arguments['pattern']),
             ),
             'tool set_led');
       case 'wiggle':
@@ -358,12 +446,45 @@ final class BotTaskHandler extends TaskHandler {
       case 'play_sound':
         _sendControl(
             PlaySoundCommand(
-                sequence: _controlSeq.next(), sound: BotSound.chirp),
+                sequence: _controlSeq.next(),
+                sound: _botSound(call.arguments['name'])),
             'tool play_sound');
+      case 'get_battery':
+        _sendControl(
+            GetBatteryCommand(sequence: _controlSeq.next()), 'tool get_battery');
+      case 'set_timer':
+        Log.i(_tag, 'set_timer stubbed until M4: $call');
       default:
         Log.w(_tag, 'unhandled tool call: $call');
     }
   }
+
+  static (int, int, int) _ledColor(Object? name) => switch ('$name') {
+        'red' => (255, 0, 0),
+        'green' => (0, 255, 0),
+        'blue' => (0, 60, 255),
+        'pink' => (255, 105, 180),
+        'purple' => (160, 0, 255),
+        'yellow' => (255, 200, 0),
+        'orange' => (255, 120, 0),
+        'white' => (255, 255, 255),
+        'cyan' => (0, 200, 255),
+        'off' => (0, 0, 0),
+        _ => (255, 105, 180),
+      };
+
+  static LedPattern _ledPattern(Object? name) => switch ('$name') {
+        'blink' => LedPattern.blink,
+        'breathe' => LedPattern.breathe,
+        'off' => LedPattern.off,
+        _ => LedPattern.solid,
+      };
+
+  static BotSound _botSound(Object? name) => switch ('$name') {
+        'beep' => BotSound.beep,
+        'purr' => BotSound.purr,
+        _ => BotSound.chirp,
+      };
 
   // --- phone alerts (notification listener -> bot) ---
 
@@ -501,6 +622,9 @@ final class BotTaskHandler extends TaskHandler {
       linkError: link?.lastError,
       brainState: session?.state ?? BrainSessionState.cold,
       brainError: session?.lastError,
+      brainKind: _gemma?.kind ?? 'FakeBrain',
+      downloadPercent: _gemma?.downloadPercent,
+      lastLatency: _gemma?.lastLatency,
       replayedEntries: session?.replayedEntries ?? 0,
       droppedUtterances: session?.droppedUtterances ?? 0,
       responseText: session?.responseText ?? '',

@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-    <!-- BLE, legacy permissions for API 29-30 (project floor is 29). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- BLE, legacy permissions for API 30 (project floor is 30). -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <!-- API 29-30 require location permission for BLE scans (companion/M1). -->
@@ -39,7 +40,26 @@
     <application
         android:label="cute_bot"
         android:name=".CuteBotApplication"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:largeHeap="true">
+        <!-- GPU via OpenCL for LiteRT-LM (M3). Android 12+ apps cannot
+             dlopen the vendor OpenCL ICD unless libvndksupport.so is
+             declared — without it the loader falls to WebGPU, which
+             hard-fails (or freezes Mali) at engine_create. required=false
+             so devices without OpenCL still install and fall back to CPU.
+             Google LiteRT-LM Android docs + flutter_gemma #324. -->
+        <uses-native-library
+            android:name="libvndksupport.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL-car.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL-pixel.so"
+            android:required="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

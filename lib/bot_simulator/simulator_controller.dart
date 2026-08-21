@@ -9,6 +9,7 @@
 // - answer battery reads/requests and announce bot state transitions
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -29,6 +30,22 @@ final class SimulatorLogEntry {
   SimulatorLogEntry(this.message) : timestamp = DateTime.now();
   final DateTime timestamp;
   final String message;
+}
+
+enum SimulatorChatRole { user, bot }
+
+/// One bubble in the simulator conversation view (M3 caption stand-in).
+final class SimulatorChatLine {
+  SimulatorChatLine({
+    required this.role,
+    required this.text,
+    this.streaming = false,
+  }) : timestamp = DateTime.now();
+
+  final DateTime timestamp;
+  final SimulatorChatRole role;
+  String text;
+  bool streaming;
 }
 
 final class SimulatorController extends ChangeNotifier {
@@ -78,6 +95,11 @@ final class SimulatorController extends ChangeNotifier {
   final List<SimulatorLogEntry> activityLog = [];
   static const int _maxLogEntries = 60;
 
+  /// Spoken turns as seen on this phone: local "you spoke" + captions
+  /// the companion writes over [ShowTextCommand].
+  final List<SimulatorChatLine> conversation = [];
+  static const int _maxChatLines = 40;
+
   // Fake battery served until real hardware exists.
   static const int _batteryPercent = 87;
   static const bool _batteryCharging = false;
@@ -124,8 +146,15 @@ final class SimulatorController extends ChangeNotifier {
       final connected = e.state == ConnectionState.connected;
       _logActivity(
           '${_shortId(e.central)} ${connected ? 'connected' : 'disconnected'}');
-      if (!connected) {
-        final id = e.central.uuid.toString();
+      final id = e.central.uuid.toString();
+      if (connected) {
+        // Phone-to-phone: the companion's CCCD write often never ACKs on
+        // OEM Android stacks, so characteristicNotifyStateChanged never
+        // fires. Treat a connected central as subscribed; nRF Connect
+        // still toggles via _onNotifyState when CCCD does arrive.
+        _audioSubscribers[id] = e.central;
+        _telemetrySubscribers[id] = e.central;
+      } else {
         _audioSubscribers.remove(id);
         _telemetrySubscribers.remove(id);
         mtuByCentral.remove(id);
@@ -395,6 +424,24 @@ final class SimulatorController extends ChangeNotifier {
           charging: _batteryCharging,
           millivolts: _batteryMillivolts,
         ));
+      case ShowTextCommand(:final utf8Text, :final isFinal):
+        _onShowText(utf8Text, isFinal: isFinal);
+    }
+  }
+
+  void _onShowText(Uint8List utf8Text, {required bool isFinal}) {
+    final text = utf8.decode(utf8Text, allowMalformed: true);
+    final last = conversation.isEmpty ? null : conversation.last;
+    if (last != null &&
+        last.role == SimulatorChatRole.bot &&
+        last.streaming) {
+      last.text = text.isEmpty ? last.text : text;
+      last.streaming = !isFinal;
+    } else if (text.isNotEmpty) {
+      _appendChat(SimulatorChatRole.bot, text, streaming: !isFinal);
+    }
+    if (isFinal && text.isNotEmpty) {
+      _logActivity('bot: $text');
     }
   }
 
@@ -446,6 +493,7 @@ final class SimulatorController extends ChangeNotifier {
     _micChecksum.reset();
     _micUtteranceStarted = false;
     _audioOutSeq.reset();
+    _appendChat(SimulatorChatRole.user, '…', streaming: true);
     notifyListeners();
 
     try {
@@ -462,6 +510,7 @@ final class SimulatorController extends ChangeNotifier {
       Log.i(_tag, 'mic streaming started');
     } catch (e) {
       talking = false;
+      _finishUserChatLine('mic failed');
       _logActivity('Mic start failed: $e');
       Log.e(_tag, 'failed to start mic stream', e);
       notifyListeners();
@@ -509,6 +558,11 @@ final class SimulatorController extends ChangeNotifier {
       _logActivity(
           'Utterance sent: $micFramesSent frames, crc ${_micChecksum.hex}');
     }
+    final audioMs = micFramesSent * AudioWireFormat.millisPerFrame;
+    final seconds = (audioMs / 1000).toStringAsFixed(1);
+    _finishUserChatLine(notifyPeers && _micUtteranceStarted
+        ? 'spoke $seconds s'
+        : 'spoke (not sent)');
     _setBotState(BotState.idle);
     Log.i(_tag,
         'mic streaming stopped, $micFramesSent frames sent, crc ${_micChecksum.hex}');
@@ -559,6 +613,30 @@ final class SimulatorController extends ChangeNotifier {
   }
 
   // --- misc ---
+
+  void _appendChat(SimulatorChatRole role, String text,
+      {bool streaming = false}) {
+    conversation.add(SimulatorChatLine(
+      role: role,
+      text: text,
+      streaming: streaming,
+    ));
+    if (conversation.length > _maxChatLines) {
+      conversation.removeRange(0, conversation.length - _maxChatLines);
+    }
+  }
+
+  void _finishUserChatLine(String text) {
+    final last = conversation.isEmpty ? null : conversation.last;
+    if (last != null &&
+        last.role == SimulatorChatRole.user &&
+        last.streaming) {
+      last.text = text;
+      last.streaming = false;
+    } else {
+      _appendChat(SimulatorChatRole.user, text);
+    }
+  }
 
   void _logActivity(String message) {
     activityLog.insert(0, SimulatorLogEntry(message));
