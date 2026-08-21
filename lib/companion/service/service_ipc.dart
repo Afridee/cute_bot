@@ -52,6 +52,11 @@ sealed class UiCommand {
           millis: _asInt(raw['millis']) ?? 1200),
       'clearTranscript' => const ClearTranscriptUiCommand(),
       'requestSnapshot' => const RequestSnapshotUiCommand(),
+      'setPhoneAlerts' => SetPhoneAlertsUiCommand(raw['enabled'] == true),
+      'phoneAlert' => PhoneAlertUiCommand(
+          packageName: raw['pkg'] is String ? raw['pkg'] as String : '',
+          category: raw['category'] is String ? raw['category'] as String : '',
+        ),
       _ => null,
     };
   }
@@ -134,6 +139,30 @@ final class RequestSnapshotUiCommand extends UiCommand {
   const RequestSnapshotUiCommand();
   @override
   Map<String, Object?> toMap() => {'cmd': 'requestSnapshot'};
+}
+
+/// Toggle "show phone alerts on bot". The service persists the choice so it
+/// survives restarts (the toggle lives in the UI, the behavior in the
+/// service).
+final class SetPhoneAlertsUiCommand extends UiCommand {
+  const SetPhoneAlertsUiCommand(this.enabled);
+  final bool enabled;
+  @override
+  Map<String, Object?> toMap() => {'cmd': 'setPhoneAlerts', 'enabled': enabled};
+}
+
+/// A qualifying phone notification was posted. NOT sent by the UI: the
+/// native CuteBotNotificationListenerService injects it over the same
+/// task-data channel (ForegroundService.sendData) so there is exactly one
+/// IPC schema. Content stays on the phone — only source package and
+/// category cross over.
+final class PhoneAlertUiCommand extends UiCommand {
+  const PhoneAlertUiCommand({required this.packageName, required this.category});
+  final String packageName;
+  final String category;
+  @override
+  Map<String, Object?> toMap() =>
+      {'cmd': 'phoneAlert', 'pkg': packageName, 'category': category};
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +257,7 @@ final class ServiceSnapshot {
     required this.batteryPercent,
     required this.batteryMillivolts,
     required this.liveMonitor,
+    required this.phoneAlertsEnabled,
     required this.receivingUtterance,
     required this.lastReceive,
     required this.lastEcho,
@@ -259,6 +289,9 @@ final class ServiceSnapshot {
   final BotState botState;
   final int? batteryPercent;
   final int? batteryMillivolts;
+
+  /// "Show phone alerts on bot" (service-persisted; toggled from the UI).
+  final bool phoneAlertsEnabled;
 
   // Audio diagnostics
   final bool liveMonitor;
@@ -293,6 +326,7 @@ final class ServiceSnapshot {
         'batteryPct': batteryPercent,
         'batteryMv': batteryMillivolts,
         'liveMonitor': liveMonitor,
+        'phoneAlerts': phoneAlertsEnabled,
         'receiving': receivingUtterance,
         'lastReceive': lastReceive?.toMap(),
         'lastEcho': lastEcho?.toMap(),
@@ -330,6 +364,7 @@ final class ServiceSnapshot {
       batteryPercent: _asInt(raw['batteryPct']),
       batteryMillivolts: _asInt(raw['batteryMv']),
       liveMonitor: raw['liveMonitor'] == true,
+      phoneAlertsEnabled: raw['phoneAlerts'] == true,
       receivingUtterance: raw['receiving'] == true,
       lastReceive: ReceiveStatsSnapshot.fromMap(raw['lastReceive']),
       lastEcho: EchoStatsSnapshot.fromMap(raw['lastEcho']),

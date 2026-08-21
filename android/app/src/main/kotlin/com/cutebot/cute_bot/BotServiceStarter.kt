@@ -54,6 +54,10 @@ object BotServiceStarter {
     private const val CHANNEL_NAME = "Cute Bot"
     private const val REOPEN_NOTIFICATION_ID = 1008
 
+    /** Sticky "the service died behind our back" marker (see below). */
+    private const val CARE_PREFS = "oem_care"
+    private const val KEY_UNEXPECTED_DEATH = "unexpectedDeathObserved"
+
     /**
      * The watchdog / presence decision, kept pure for unit tests.
      *
@@ -72,6 +76,41 @@ object BotServiceStarter {
     }
 
     /**
+     * The decision [ensureRunning] would make right now, without acting on
+     * it. [StartDecision.START] means the service died behind our back
+     * (OEM cleaner force-stop, crash, ...).
+     */
+    fun currentDecision(context: Context): StartDecision {
+        val lastAction = ForegroundServiceStatus.getData(context).action
+        return decide(lastAction, isBotServiceRunning(context))
+    }
+
+    /**
+     * True if the service was EVER observed dead while it should have been
+     * running — the signature of an OEM cleaner force-stop (seen on the
+     * iQOO Neo 10). Sticky on purpose: after a force-stop the watchdog can
+     * revive the service seconds after the app process comes back, i.e.
+     * before the UI gets a chance to look, so a live wanted-but-dead check
+     * would race it and miss. Both [ensureRunning] and this method record
+     * the observation; the Dart side keeps its own ask-once flag for the
+     * guidance page, so this marker is never cleared.
+     */
+    fun checkUnexpectedDeath(context: Context): Boolean {
+        if (currentDecision(context) == StartDecision.START) {
+            recordUnexpectedDeath(context)
+            return true
+        }
+        return context.getSharedPreferences(CARE_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_UNEXPECTED_DEATH, false)
+    }
+
+    private fun recordUnexpectedDeath(context: Context) {
+        Log.w(TAG, "service found dead while it should be running; recorded")
+        context.getSharedPreferences(CARE_PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_UNEXPECTED_DEATH, true).apply()
+    }
+
+    /**
      * Restarts the bot service if (and only if) it should be running but is
      * not. Returns the decision that was made; a rejected start posts the
      * reopen notification and still returns [StartDecision.START].
@@ -81,6 +120,11 @@ object BotServiceStarter {
         val decision = decide(lastAction, isBotServiceRunning(context))
         Log.i(TAG, "ensureRunning($reason): action=$lastAction -> $decision")
         if (decision != StartDecision.START) return decision
+
+        // We are about to resurrect a service that something else killed —
+        // remember that for the keep-alive guidance, since our restart hides
+        // the evidence from the UI's own launch-time check.
+        recordUnexpectedDeath(context)
 
         try {
             // Same start path as the plugin's own RestartReceiver: mark the

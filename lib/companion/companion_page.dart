@@ -9,6 +9,7 @@ import 'bot_link.dart';
 import 'brain/brain_session.dart';
 import 'brain/transcript.dart';
 import 'companion_controller.dart';
+import 'oem_guidance_page.dart';
 import 'service/service_ipc.dart';
 
 class CompanionPage extends StatefulWidget {
@@ -18,19 +19,48 @@ class CompanionPage extends StatefulWidget {
   State<CompanionPage> createState() => _CompanionPageState();
 }
 
-class _CompanionPageState extends State<CompanionPage> {
+class _CompanionPageState extends State<CompanionPage>
+    with WidgetsBindingObserver {
   late final CompanionController _controller;
+  bool _oemGuidancePushed = false;
 
   @override
   void initState() {
     super.initState();
     _controller = CompanionController();
+    _controller.addListener(_maybeShowOemGuidance);
     _controller.start();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Coming back from system settings (Notification access, battery):
+    // re-read the native state so the cards update without a restart.
+    if (state == AppLifecycleState.resumed) {
+      _controller.refreshOemDiagnostics();
+    }
+  }
+
+  /// One-time push of the keep-alive guidance after the controller detects
+  /// that this phone's cleaner force-stopped the service (vivo/iQOO).
+  void _maybeShowOemGuidance() {
+    if (!_controller.oemGuidancePending || _oemGuidancePushed) return;
+    _oemGuidancePushed = true;
+    _controller.markOemGuidanceShown();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => OemGuidancePage(controller: _controller),
+      ));
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     // The controller detaches from the service; the service keeps running.
+    _controller.removeListener(_maybeShowOemGuidance);
     _controller.dispose();
     super.dispose();
   }
@@ -156,6 +186,12 @@ class _ServiceCard extends StatelessWidget {
                       : 'Battery: restricted',
                   ok: c.batteryOptimizationExempt,
                 ),
+                _Chip(
+                  label: c.notificationAccessGranted
+                      ? 'Alert access: on'
+                      : 'Alert access: off',
+                  ok: c.notificationAccessGranted,
+                ),
                 if (snapshotAge != null)
                   _Chip(
                     label: 'Snapshot ${snapshotAge.inSeconds}s ago',
@@ -163,10 +199,30 @@ class _ServiceCard extends StatelessWidget {
                   ),
               ],
             ),
+            // "Show phone alerts on bot": rendered from the snapshot (the
+            // service owns and persists the setting); needs Notification
+            // access to have any effect, so it is disabled until granted.
+            if (c.snapshot != null)
+              Row(
+                children: [
+                  const Expanded(child: Text('Show phone alerts on bot')),
+                  Switch(
+                    value: c.snapshot!.phoneAlertsEnabled,
+                    onChanged: c.notificationAccessGranted
+                        ? c.setPhoneAlerts
+                        : null,
+                  ),
+                ],
+              ),
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
               children: [
+                if (!c.notificationAccessGranted)
+                  FilledButton.tonal(
+                    onPressed: c.openNotificationAccessSettings,
+                    child: const Text('Allow notification access'),
+                  ),
                 if (!c.batteryOptimizationExempt)
                   FilledButton.tonal(
                     onPressed: c.requestBatteryExemption,
@@ -181,6 +237,17 @@ class _ServiceCard extends StatelessWidget {
                   FilledButton(
                     onPressed: c.restartService,
                     child: const Text('Start service'),
+                  ),
+                // vivo/iQOO only: the one-time auto-shown guidance stays
+                // reachable, because the cleaner settings can be reverted.
+                if (c.isAggressiveOem)
+                  TextButton(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => OemGuidancePage(controller: c),
+                      ),
+                    ),
+                    child: const Text('Keep-alive tips'),
                   ),
               ],
             ),

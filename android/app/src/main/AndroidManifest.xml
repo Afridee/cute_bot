@@ -29,9 +29,12 @@
     <uses-feature
         android:name="android.software.companion_device_setup"
         android:required="false" />
+    <!-- Custom Application: records "service died behind our back" at
+         process start, before flutter_foreground_task's restart path can
+         revive the service and hide the evidence (see CuteBotApplication). -->
     <application
         android:label="cute_bot"
-        android:name="${applicationName}"
+        android:name=".CuteBotApplication"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
@@ -73,6 +76,30 @@
             android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
             <intent-filter>
                 <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
+        <!-- Dummy receiver: flipping its enabled state fires PACKAGE_CHANGED
+             so NotificationManagerService rebinds our listener after a
+             cleaner kill. Never disable the listener component itself —
+             on vivo that revokes Notification access. See ListenerBindPoke. -->
+        <receiver
+            android:name=".ListenerBindPoke"
+            android:enabled="false"
+            android:exported="false" />
+        <!-- Notification listener: powers "phone alerts on bot" AND is the
+             strongest keep-alive anchor on vivo/iQOO — once the user grants
+             Notification access, system_server keeps a persistent bind and
+             re-binds after the OEM cleaner kills the process, reviving the
+             foreground service (same mechanism that makes Nothing X
+             swipe-proof on these phones). See
+             CuteBotNotificationListenerService. -->
+        <service
+            android:name=".CuteBotNotificationListenerService"
+            android:exported="true"
+            android:label="Cute Bot"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
         <!-- Don't delete the meta-data below.

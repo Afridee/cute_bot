@@ -20,6 +20,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import '../shared/ble_protocol.dart';
 import '../shared/log.dart';
 import 'companion_device_link.dart';
+import 'oem_care.dart';
 import 'service/bot_service.dart';
 import 'service/service_ipc.dart';
 
@@ -53,6 +54,23 @@ final class CompanionController extends ChangeNotifier {
 
   bool batteryOptimizationExempt = false;
 
+  /// Filled once at [start]; null until then (or on channel failure).
+  OemDiagnostics? oemDiagnostics;
+
+  /// True exactly once per install: the service died behind our back on an
+  /// aggressive OEM (vivo/iQOO cleaner force-stop) and the guidance page has
+  /// not been shown yet. The page consumes it via [markOemGuidanceShown].
+  bool oemGuidancePending = false;
+
+  /// Whether this device's OEM is known to force-stop background apps —
+  /// keeps the manual "Keep-alive tips" entry point visible in the UI.
+  bool get isAggressiveOem => oemDiagnostics?.isAggressiveOem ?? false;
+
+  /// Notification access = phone alerts on the bot + the OS re-binding our
+  /// listener (reviving the service) after OEM cleaner kills.
+  bool get notificationAccessGranted =>
+      oemDiagnostics?.notificationAccessGranted ?? false;
+
   /// CDM association state (M2.5). Owned here because the CDM chooser needs
   /// an Activity, same as the permission flows.
   final CompanionDeviceLink companionLink = CompanionDeviceLink();
@@ -65,6 +83,11 @@ final class CompanionController extends ChangeNotifier {
   /// "Allow background" button in the UI remains for later minds.
   static const String _batteryPromptedKey = 'batteryExemptionPrompted';
 
+  /// Persisted marker: the OEM keep-alive guidance page was already shown
+  /// once on this install. Same ask-once policy as the battery prompt; the
+  /// "Keep-alive tips" button in the UI remains for later minds.
+  static const String _oemGuidanceShownKey = 'oemGuidanceShown';
+
   Future<void> start() async {
     if (_started) return;
     _started = true;
@@ -76,6 +99,14 @@ final class CompanionController extends ChangeNotifier {
     // observation natively. Fire-and-forget; the card renders when ready.
     companionLink.addListener(notifyListeners);
     unawaited(companionLink.refresh());
+
+    // OEM-killer detection. Observed on the iQOO Neo 10: vivo's cleaner
+    // force-stops the app, which kills the service AND blocks every restart
+    // mechanism until the next manual launch — i.e. right now. The native
+    // side keeps a sticky wanted-but-dead marker (so a watchdog revival
+    // can't hide the death); if set on an aggressive OEM, teach the user
+    // once via the guidance page.
+    await _checkOemKiller();
 
     // Attach path: service already running (started earlier, or auto-
     // restarted after kill/boot). Don't redo permissions, just listen.
@@ -213,6 +244,36 @@ final class CompanionController extends ChangeNotifier {
     }
   }
 
+  Future<void> _checkOemKiller() async {
+    oemDiagnostics = await OemCare.diagnostics();
+    final diag = oemDiagnostics;
+    if (diag == null || !diag.isAggressiveOem || !diag.serviceDiedUnexpectedly) {
+      return;
+    }
+    Log.w(_tag,
+        'service died behind our back on ${diag.manufacturer}/${diag.brand}');
+    try {
+      final shown =
+          await FlutterForegroundTask.getData<bool>(key: _oemGuidanceShownKey) ??
+              false;
+      if (!shown) oemGuidancePending = true;
+    } catch (e) {
+      Log.w(_tag, 'OEM guidance flag read failed: $e');
+    }
+  }
+
+  /// Called by the UI the moment it pushes the guidance page: consumes the
+  /// pending flag and persists ask-once, even if the user backs right out.
+  Future<void> markOemGuidanceShown() async {
+    oemGuidancePending = false;
+    try {
+      await FlutterForegroundTask.saveData(
+          key: _oemGuidanceShownKey, value: true);
+    } catch (e) {
+      Log.w(_tag, 'OEM guidance flag write failed: $e');
+    }
+  }
+
   Future<bool> _batteryPromptAlreadyOffered() async {
     try {
       return await FlutterForegroundTask.getData<bool>(
@@ -243,6 +304,21 @@ final class CompanionController extends ChangeNotifier {
     await _refreshBatteryOptimization();
   }
 
+  /// Re-reads the native diagnostics (notification access, sticky death
+  /// marker). Called when the app resumes, so granting Notification access
+  /// in system settings is reflected the moment the user comes back.
+  Future<void> refreshOemDiagnostics() async {
+    final refreshed = await OemCare.diagnostics();
+    if (refreshed == null) return;
+    oemDiagnostics = refreshed;
+    notifyListeners();
+  }
+
+  /// Deep-link to the system Notification access screen. Manual button —
+  /// available forever, unlike the ask-once auto-shown guidance.
+  Future<void> openNotificationAccessSettings() =>
+      OemCare.openNotificationAccessSettings();
+
   /// Deliberate user stop — the only path that kills the bot on purpose.
   Future<void> stopService() async {
     await FlutterForegroundTask.stopService();
@@ -271,6 +347,9 @@ final class CompanionController extends ChangeNotifier {
 
   void toggleLiveMonitor() =>
       _send(SetLiveMonitorUiCommand(!(snapshot?.liveMonitor ?? true)));
+
+  void setPhoneAlerts(bool enabled) =>
+      _send(SetPhoneAlertsUiCommand(enabled));
 
   void echoLastUtterance() => _send(const EchoLastUtteranceUiCommand());
 

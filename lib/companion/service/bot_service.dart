@@ -65,6 +65,19 @@ final class BotTaskHandler extends TaskHandler {
   int? _batteryPercent;
   int? _batteryMillivolts;
 
+  // Phone alerts (events injected by the native notification listener).
+  // Default ON: the events only flow once the user grants Notification
+  // access, so granting IS the opt-in; the toggle exists to turn the bot
+  // reaction off while keeping the keep-alive benefit of the listener.
+  static const String _phoneAlertsKey = 'phoneAlertsEnabled';
+  bool _phoneAlertsEnabled = true;
+
+  /// Actuation debounce on top of the listener's 3 s forward debounce: a
+  /// burst of alerts becomes one blink+chirp, not a BLE flood.
+  static const Duration _minPhoneAlertGap = Duration(seconds: 5);
+  DateTime _lastPhoneAlertAt = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _phoneAlertRestore;
+
   final List<String> _activity = [];
   static const int _maxActivity = 40;
 
@@ -109,6 +122,14 @@ final class BotTaskHandler extends TaskHandler {
     _subscriptions.add(_link!.telemetry.listen(_onTelemetry));
 
     try {
+      _phoneAlertsEnabled =
+          await FlutterForegroundTask.getData<bool>(key: _phoneAlertsKey) ??
+              true;
+    } catch (e) {
+      Log.w(_tag, 'phone alerts flag read failed: $e');
+    }
+
+    try {
       await FlutterPcmSound.setup(
         sampleRate: AudioWireFormat.sampleRate,
         channelCount: AudioWireFormat.channels,
@@ -139,6 +160,7 @@ final class BotTaskHandler extends TaskHandler {
     Log.w(_tag, 'service destroyed (timeout: $isTimeout)');
     _pendingSnapshot?.cancel();
     _pendingNotification?.cancel();
+    _phoneAlertRestore?.cancel();
     for (final sub in _subscriptions) {
       unawaited(sub.cancel());
     }
@@ -193,6 +215,13 @@ final class BotTaskHandler extends TaskHandler {
       case ClearTranscriptUiCommand():
         _logActivity('Transcript cleared');
         unawaited(_session?.clearTranscript());
+      case SetPhoneAlertsUiCommand(:final enabled):
+        _phoneAlertsEnabled = enabled;
+        _logActivity('Phone alerts ${enabled ? 'on' : 'off'}');
+        unawaited(FlutterForegroundTask.saveData(
+            key: _phoneAlertsKey, value: enabled));
+      case PhoneAlertUiCommand(:final packageName, :final category):
+        _onPhoneAlert(packageName, category);
       case RequestSnapshotUiCommand():
         break; // snapshot goes out below either way
     }
@@ -336,6 +365,44 @@ final class BotTaskHandler extends TaskHandler {
     }
   }
 
+  // --- phone alerts (notification listener -> bot) ---
+
+  /// Shows a phone notification on the bot's body: brief cyan blink +
+  /// chirp, then back to whatever the brain state was expressing. The
+  /// listener already did the keep-alive part (ensureRunning) natively, so
+  /// a disconnected bot means there is simply nothing to do here.
+  void _onPhoneAlert(String packageName, String category) {
+    if (!_phoneAlertsEnabled) return;
+    if (_link?.state != BotLinkState.ready) return;
+    final now = DateTime.now();
+    if (now.difference(_lastPhoneAlertAt) < _minPhoneAlertGap) return;
+    _lastPhoneAlertAt = now;
+
+    final label = category.isEmpty ? packageName : '$packageName ($category)';
+    _logActivity('Phone alert: $label');
+    _sendControl(
+        SetLedCommand(
+          sequence: _controlSeq.next(),
+          red: 0,
+          green: 180,
+          blue: 255,
+          pattern: LedPattern.blink,
+        ),
+        'alert led',
+        quiet: true);
+    _sendControl(
+        PlaySoundCommand(sequence: _controlSeq.next(), sound: BotSound.chirp),
+        'alert chirp',
+        quiet: true);
+
+    _phoneAlertRestore?.cancel();
+    _phoneAlertRestore = Timer(const Duration(seconds: 2), () {
+      final session = _session;
+      if (session == null) return;
+      _expressBrainState(session.state, hadError: session.lastError != null);
+    });
+  }
+
   // --- link ---
 
   void _onLinkChanged() {
@@ -442,6 +509,7 @@ final class BotTaskHandler extends TaskHandler {
       batteryPercent: _batteryPercent,
       batteryMillivolts: _batteryMillivolts,
       liveMonitor: _liveMonitor,
+      phoneAlertsEnabled: _phoneAlertsEnabled,
       receivingUtterance: _receivingUtterance,
       lastReceive: _lastReceive,
       lastEcho: _lastEcho,

@@ -22,6 +22,8 @@ void main() {
         SimulateUtteranceUiCommand(millis: 900),
         ClearTranscriptUiCommand(),
         RequestSnapshotUiCommand(),
+        SetPhoneAlertsUiCommand(false),
+        PhoneAlertUiCommand(packageName: 'com.whatsapp', category: 'msg'),
       ];
       for (final command in commands) {
         final decoded = UiCommand.fromMap(command.toMap());
@@ -46,6 +48,34 @@ void main() {
               const SetLiveMonitorUiCommand(false).toMap())
           as SetLiveMonitorUiCommand;
       expect(monitor.enabled, isFalse);
+
+      final alert = UiCommand.fromMap(const PhoneAlertUiCommand(
+              packageName: 'com.whatsapp', category: 'msg')
+          .toMap()) as PhoneAlertUiCommand;
+      expect((alert.packageName, alert.category), ('com.whatsapp', 'msg'));
+
+      final alerts = UiCommand.fromMap(
+              const SetPhoneAlertsUiCommand(false).toMap())
+          as SetPhoneAlertsUiCommand;
+      expect(alerts.enabled, isFalse);
+    });
+
+    test('phoneAlert map as sent by the native listener decodes', () {
+      // The Kotlin side builds this map by hand — pin the schema.
+      final decoded = UiCommand.fromMap({
+        'cmd': 'phoneAlert',
+        'pkg': 'com.whatsapp',
+        'category': 'msg',
+      });
+      expect(decoded, isA<PhoneAlertUiCommand>());
+      final alert = decoded as PhoneAlertUiCommand;
+      expect(alert.packageName, 'com.whatsapp');
+      expect(alert.category, 'msg');
+
+      // Missing fields degrade to empty strings, never throw.
+      final bare = UiCommand.fromMap({'cmd': 'phoneAlert'})
+          as PhoneAlertUiCommand;
+      expect((bare.packageName, bare.category), ('', ''));
     });
 
     test('unknown or malformed input decodes to null', () {
@@ -77,6 +107,7 @@ void main() {
           batteryPercent: 87,
           batteryMillivolts: 4012,
           liveMonitor: true,
+          phoneAlertsEnabled: false,
           receivingUtterance: false,
           lastReceive: const ReceiveStatsSnapshot(
             frames: 120,
@@ -113,6 +144,7 @@ void main() {
         expect(s.botState, BotState.listening);
         expect(s.batteryPercent, 87);
         expect(s.liveMonitor, isTrue);
+        expect(s.phoneAlertsEnabled, isFalse);
         expect(s.lastReceive!.frames, 120);
         expect(s.lastReceive!.realTimeRate, closeTo(1.14, 1e-9));
         expect(s.lastReceive!.checksumHex, 'deadbeef');
