@@ -1,5 +1,10 @@
 # M2 human-bar testing guide — the service must not die (and when it does, it must come back)
 
+> **Status:** M2 agent bar is complete. M2.5 added CDM, a notification
+> listener, a keep-alive alarm, and a watchdog for kills this guide treats
+> as out of scope (`force-stop`, vivo Recents). Use
+> `Docs/m2.5-testing-guide.md` for those. Current product status: `README.md`.
+
 M2's claim: the bot lives in a foreground service, not in the app UI. The
 human bar from the brief:
 
@@ -30,8 +35,10 @@ logged.
 ## Test 1 — swipe from recents
 
 1. Note the transcript contents.
-2. Swipe the companion app out of recents. The notification ("Cute Bot —
-   bot connected · brain ready") must stay.
+2. Swipe the companion app out of recents. The notification (`Connected ·
+   87% · idle`, or `Connected · idle` before the first telemetry) must stay.
+   On **vivo/iQOO** a Recents swipe is a cleaner kill, not an M2 swipe-test
+   — that recovery is M2.5 §6 in `Docs/m2.5-testing-guide.md`.
 3. Speak into the simulator. **Pass:** the bot reacts (LED + chirp) with the
    UI dead. The FakeBrain's spoken-duration reply also proves audio actually
    crossed: check the transcript after reopening.
@@ -56,9 +63,11 @@ adb shell am force-stop com.cutebot.cute_bot  # the sledgehammer — see note
 
 Note: `force-stop` also disables the app's alarms/receivers until the next
 manual launch — Android treats it as "the user said stop". A service that
-does **not** come back after `force-stop` is expected OS behavior, not an M2
-failure. `am kill` (or letting the low-memory killer do it naturally —
-open a dozen heavy apps) is the honest test.
+does **not** come back after `force-stop` is expected **M2** OS behavior,
+not an M2 failure. `am kill` (or letting the low-memory killer do it
+naturally — open a dozen heavy apps) is the honest M2 test. M2.5 adds
+CDM / notification-listener / keep-alive / watchdog recovery for the
+cases M2 cannot cover — see `Docs/m2.5-testing-guide.md`.
 
 ## Test 3 — reboot
 
@@ -68,8 +77,9 @@ open a dozen heavy apps) is the honest test.
 3. Speak into the simulator once it reconnects. **Pass:** bot responds.
 4. **If the service did not start:** note the device/OEM. Android 12+
    background-start restrictions or an OEM battery manager blocked the
-   BOOT_COMPLETED path. That's the known gap in the README — the tappable-
-   notification fallback gets built if any test device hits this.
+   BOOT_COMPLETED path. M2.5 covers this: the tappable "reopen the app"
+   notification (watchdog, ~15 min), and — if Notification access is
+   granted — listener rebind after boot. See `Docs/m2.5-testing-guide.md`.
 
 ## Test 4 — the rest of the failure matrix (quick passes)
 

@@ -1,5 +1,9 @@
 # M1 Human-Bar Testing Guide — the Bandwidth Gate
 
+> **Status:** M1 agent bar is complete and M2+ is in the tree. This guide
+> is still the bandwidth-gate procedure (two phones, Companion +
+> Simulator). Current product status: `README.md`.
+
 ## Purpose
 
 M1 built the Companion app as the BLE central: scan, auto-connect, MTU

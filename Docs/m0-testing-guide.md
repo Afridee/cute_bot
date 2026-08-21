@@ -1,5 +1,10 @@
 # M0 Human-Bar Testing Guide
 
+> **Status:** M0 is complete. This guide is the original human bar (nRF
+> Connect against the simulator). The Companion app exists as of M1 and
+> **does** scan/connect — ignore the "placeholder" row below if you are
+> not specifically re-running M0. Current product status: `README.md`.
+
 ## Purpose
 
 M0 is the first milestone in the Cute Bot project: define the BLE protocol contract

@@ -1,5 +1,11 @@
 # Cursor Agent Brief — "Bot Companion" Flutter App
 
+> **Repo status (Aug 2026):** M0–M2 and M2.5 (background survivability) are
+> implemented; M3 (`GemmaBrain`) has not started. Treat this file as the
+> original product brief, not a snapshot of the tree. Current layout,
+> native keep-alive paths, and known gaps live in `README.md`. Human-bar
+> steps for the latest survivability work are in `Docs/m2.5-testing-guide.md`.
+
 ## What we're building
 
 A Flutter app that pairs with a small physical desk robot (mic + speaker + BLE, eventually an
