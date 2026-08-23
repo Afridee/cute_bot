@@ -33,7 +33,7 @@ enum BrainSessionState {
   /// Warm and idle: ready for an utterance.
   ready,
 
-  /// An utterance is queued or being prefilled.
+  /// An utterance is arriving, queued, or being prefilled.
   thinking,
 
   /// Response text is streaming.
@@ -78,6 +78,7 @@ final class BrainSession extends ChangeNotifier {
   /// nothing runs concurrently against the brain.
   Future<void> _queue = Future.value();
   bool _disposed = false;
+  bool _turnInFlight = false;
 
   /// Loads the transcript and warms the brain. Safe to call again after a
   /// failed warm-up (retry path); a no-op when already warm.
@@ -104,6 +105,25 @@ final class BrainSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// First audio frame of a live utterance. Flips [ready] → [thinking] so
+  /// the UI and bot LEDs move while frames are still arriving. No-op if a
+  /// turn is already in flight or the brain is not idle.
+  void noteIncomingAudio() {
+    if (_disposed) return;
+    if (state != BrainSessionState.ready) return;
+    state = BrainSessionState.thinking;
+    notifyListeners();
+  }
+
+  /// Reverts [noteIncomingAudio] when the clip finalized empty (lost all
+  /// samples, or an end-only frame) and no turn was queued.
+  void cancelListening() {
+    if (_disposed) return;
+    if (state != BrainSessionState.thinking || _turnInFlight) return;
+    state = BrainSessionState.ready;
+    notifyListeners();
+  }
+
   /// Queues one utterance for a response. Returns when the turn finishes
   /// (or is dropped). Concurrent callers are serialized, never rejected.
   Future<void> handleUtterance(AudioClip clip) {
@@ -125,6 +145,7 @@ final class BrainSession extends ChangeNotifier {
   Future<void> _runTurn(AudioClip clip) async {
     if (_disposed) return;
 
+    _turnInFlight = true;
     state = BrainSessionState.thinking;
     responseText = '';
     notifyListeners();
@@ -161,18 +182,21 @@ final class BrainSession extends ChangeNotifier {
     } catch (e, stack) {
       lastError = 'respond failed: $e';
       Log.e(_tag, 'respond stream failed', e, stack);
+    } finally {
+      if (completed && responseText.isNotEmpty && !_disposed) {
+        lastResponseText = responseText;
+        await _transcript.append(TranscriptEntry(
+          role: TranscriptRole.bot,
+          text: responseText,
+        ));
+      }
+      responseText = '';
+      _turnInFlight = false;
+      if (!_disposed) {
+        state = BrainSessionState.ready;
+        notifyListeners();
+      }
     }
-
-    if (completed && responseText.isNotEmpty) {
-      lastResponseText = responseText;
-      await _transcript.append(TranscriptEntry(
-        role: TranscriptRole.bot,
-        text: responseText,
-      ));
-    }
-    responseText = '';
-    state = BrainSessionState.ready;
-    notifyListeners();
   }
 
   Future<void> clearTranscript() async {

@@ -59,6 +59,7 @@ final class BotTaskHandler extends TaskHandler {
   bool _receivingUtterance = false;
   DateTime? _utteranceFirstArrival;
   DateTime? _utteranceLastArrival;
+  Timer? _utteranceIdle;
   Int16List? _lastUtterancePcm;
   ReceiveStatsSnapshot? _lastReceive;
   EchoStatsSnapshot? _lastEcho;
@@ -199,6 +200,7 @@ final class BotTaskHandler extends TaskHandler {
     _pendingNotification?.cancel();
     _pendingCaption?.cancel();
     _phoneAlertRestore?.cancel();
+    _utteranceIdle?.cancel();
     for (final sub in _subscriptions) {
       unawaited(sub.cancel());
     }
@@ -275,15 +277,35 @@ final class BotTaskHandler extends TaskHandler {
 
   // --- inbound audio: radio -> reassembler -> brain ---
 
+  /// End-of-utterance is one BLE notify. With the 20–30% loss we see on
+  /// this link, that frame often never arrives. The reassembler would then
+  /// sit open until the *next* talk. Finalize after this much silence.
+  static const Duration _utteranceIdleTimeout = Duration(milliseconds: 1500);
+
   void _onAudioFrame(AudioChunkMessage message) {
     final now = DateTime.now();
-    if (message.isUtteranceStart || !_receivingUtterance) {
-      _receivingUtterance = true;
+    final started = message.isUtteranceStart || !_receivingUtterance;
+    if (started) {
       _utteranceFirstArrival = now;
+      Log.i(_tag, 'utterance started (seq ${message.sequence})');
+      _session?.noteIncomingAudio();
     }
     _utteranceLastArrival = now;
     _reassembler.add(message);
-    if (message.isUtteranceEnd) _pushSnapshot();
+    // add() may have finalized a previous clip (lost-end + new start).
+    _receivingUtterance = _reassembler.inUtterance;
+    if (_receivingUtterance) {
+      _utteranceIdle?.cancel();
+      _utteranceIdle = Timer(_utteranceIdleTimeout, _onUtteranceIdle);
+    }
+    if (started || message.isUtteranceEnd) _pushSnapshot();
+  }
+
+  void _onUtteranceIdle() {
+    _utteranceIdle = null;
+    if (!_receivingUtterance) return;
+    Log.w(_tag, 'utterance end missing, finalizing after idle');
+    _reassembler.reset();
   }
 
   void _onLivePcm(Int16List pcm) {
@@ -293,6 +315,8 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   void _onUtteranceComplete(UtteranceResult result) {
+    _utteranceIdle?.cancel();
+    _utteranceIdle = null;
     _receivingUtterance = false;
     final wallMillis = (_utteranceFirstArrival != null &&
             _utteranceLastArrival != null)
@@ -315,6 +339,8 @@ final class BotTaskHandler extends TaskHandler {
 
     if (result.pcm.isNotEmpty) {
       unawaited(_session?.handleUtterance(AudioClip(pcm: result.pcm)));
+    } else {
+      _session?.cancelListening();
     }
     _pushSnapshot();
   }

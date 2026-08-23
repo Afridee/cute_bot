@@ -195,6 +195,22 @@ void main() {
       expect(results[1].framesLost, 0);
     });
 
+    test('lost end frame: reset() still delivers the clip (idle timeout)', () {
+      final frames = chunkUtterance(makePcm(960), 517);
+      UtteranceResult? result;
+      final ra = UtteranceReassembler(onUtterance: (u) => result = u);
+      for (final frame in frames.take(frames.length - 1)) {
+        ra.add(frame);
+      }
+      expect(ra.inUtterance, isTrue);
+      expect(result, isNull);
+      ra.reset();
+      expect(ra.inUtterance, isFalse);
+      expect(result, isNotNull);
+      expect(result!.sawEnd, isFalse);
+      expect(result!.pcm, isNotEmpty);
+    });
+
     test('huge sequence jump caps silence substitution', () {
       // Build directly: start frame seq 0, then a frame claiming seq 2000.
       final encoder = ImaAdpcmEncoder();

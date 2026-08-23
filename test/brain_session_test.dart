@@ -146,6 +146,42 @@ void main() {
     expect(calls.single.name, 'set_led');
   });
 
+  test('noteIncomingAudio flips ready to thinking; cancelListening reverts',
+      () async {
+    final session = BrainSession(
+      brain: _instantBrain(),
+      transcript: TranscriptStore(InMemoryKeyValueStore()),
+    );
+    await session.start();
+    expect(session.state, BrainSessionState.ready);
+
+    session.noteIncomingAudio();
+    expect(session.state, BrainSessionState.thinking);
+
+    session.cancelListening();
+    expect(session.state, BrainSessionState.ready);
+  });
+
+  test('cancelListening does not abort a turn already in flight', () async {
+    final brain = _GatedBrain();
+    final session = BrainSession(
+      brain: brain,
+      transcript: TranscriptStore(InMemoryKeyValueStore()),
+    );
+    await session.start();
+
+    final turn = session.handleUtterance(_clip());
+    await Future<void>.delayed(Duration.zero);
+    expect(session.state, BrainSessionState.thinking);
+
+    session.cancelListening();
+    expect(session.state, BrainSessionState.thinking);
+
+    brain.gates.single.complete();
+    await turn;
+    expect(session.state, BrainSessionState.ready);
+  });
+
   test('a BrainError turn records the error and returns to ready', () async {
     // Brain not warmed inside: FakeBrain yields BrainError if respond is
     // forced early — simulate by disposing the brain under the session.
