@@ -28,6 +28,7 @@ package com.cutebot.cute_bot
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
@@ -53,6 +54,8 @@ class OemCareHandler(private val context: Context) : MethodChannel.MethodCallHan
                 ))
             "openNotificationAccessSettings" ->
                 result.success(openNotificationAccessSettings())
+            "openBluetoothSettings" -> result.success(openBluetoothSettings())
+            "openAppSettings" -> result.success(openAppSettings())
             else -> result.notImplemented()
         }
     }
@@ -84,6 +87,30 @@ class OemCareHandler(private val context: Context) : MethodChannel.MethodCallHan
             true
         } catch (e: ActivityNotFoundException) {
             Log.e(TAG, "no notification listener settings screen on this device")
+            false
+        }
+    }
+
+    private fun openBluetoothSettings(): Boolean {
+        val flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        return try {
+            context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(flags))
+            true
+        } catch (e: ActivityNotFoundException) {
+            Log.w(TAG, "Bluetooth settings missing; falling back to app settings")
+            openAppSettings()
+        }
+    }
+
+    private fun openAppSettings(): Boolean {
+        return try {
+            context.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.fromParts("package", context.packageName, null))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true
+        } catch (e: ActivityNotFoundException) {
+            Log.e(TAG, "no application details settings on this device")
             false
         }
     }

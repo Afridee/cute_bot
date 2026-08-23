@@ -4,7 +4,6 @@
 // - discover GATT, subscribe to audio + telemetry notifications, then
 //   negotiate MTU (CCCD writes after MTU 517 hang on some Android OEM stacks)
 // - auto-reconnect on drop with exponential backoff (rescan, because
-// - auto-reconnect on drop with exponential backoff (rescan, because
 //   Android peripherals rotate their random address, so a remembered
 //   handle can go stale)
 // - prioritized write queue: control commands always jump ahead of queued
@@ -94,6 +93,33 @@ enum BotLinkState {
   reconnectWait,
 }
 
+/// A scan that reports success but never delivers a result — common after
+/// the service isolate is freshly spawned — should be cycled. Stay under
+/// Android's 5 startScan / 30 s cap: one refresh per this window is fine.
+const Duration kScanStaleAfter = Duration(seconds: 25);
+
+/// Whether a running scan has gone quiet long enough to restart.
+@visibleForTesting
+bool shouldRefreshStaleScan({
+  required BotLinkState state,
+  required DateTime? scanningSince,
+  required DateTime now,
+  Duration staleAfter = kScanStaleAfter,
+}) {
+  if (state != BotLinkState.scanning || scanningSince == null) return false;
+  return now.difference(scanningSince) >= staleAfter;
+}
+
+/// startDiscovery's Future completes when the scanner starts, but an
+/// advertisement can already have been delivered. Do not take (or fail)
+/// the scanning state if a connect is already in flight.
+@visibleForTesting
+bool shouldAdoptScanningState(BotLinkState state) {
+  return state != BotLinkState.connecting &&
+      state != BotLinkState.configuring &&
+      state != BotLinkState.ready;
+}
+
 /// A queued control write, completed when the peripheral acks it.
 final class _ControlWrite {
   _ControlWrite(this.frame);
@@ -159,6 +185,7 @@ final class BotLink extends ChangeNotifier {
 
   Timer? _reconnectTimer;
   Timer? _connectTimeout;
+  DateTime? _scanningSince;
   bool _started = false;
   bool _stopping = false;
 
@@ -213,6 +240,34 @@ final class BotLink extends ChangeNotifier {
     _listen(_central.characteristicNotified, _onNotified);
 
     _onRadioState(BluetoothLowEnergyStateChangedEventArgs(_central.state));
+  }
+
+  /// Service heartbeat. Cycles a scan that has gone quiet so a freshly
+  /// spawned isolate cannot sit on a scanner that reports success but
+  /// never delivers the bot's advertisements.
+  void onHeartbeat() {
+    if (!shouldRefreshStaleScan(
+      state: state,
+      scanningSince: _scanningSince,
+      now: DateTime.now(),
+    )) {
+      return;
+    }
+    Log.i(_tag, 'scan refresh (quiet for $kScanStaleAfter)');
+    unawaited(_refreshScan());
+  }
+
+  Future<void> _refreshScan() async {
+    if (_stopping || state != BotLinkState.scanning) return;
+    _scanningSince = DateTime.now();
+    try {
+      await _central.stopDiscovery();
+    } catch (e) {
+      Log.w(_tag, 'scan refresh stopDiscovery: ${bleLogDetail(e)}');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    if (_stopping || state != BotLinkState.scanning) return;
+    await _startScan();
   }
 
   /// BLE plugin streams must not crash the service isolate. Async handlers
@@ -290,11 +345,15 @@ final class BotLink extends ChangeNotifier {
       await _central.startDiscovery(
         serviceUUIDs: [UUID.fromString(BotUuids.service)],
       );
+      if (_stopping || !shouldAdoptScanningState(state)) return;
       state = BotLinkState.scanning;
+      _scanningSince = DateTime.now();
       Log.i(_tag, 'scanning for ${BotUuids.service}');
     } catch (e) {
       // Typical cause: scan requested while the radio is settling. Retry
-      // through the normal backoff path.
+      // through the normal backoff path. A result can also land before
+      // this Future completes — don't bounce a live connect into backoff.
+      if (_stopping || !shouldAdoptScanningState(state)) return;
       lastError = bleFailureMessage('Scan', e);
       Log.e(_tag, 'startDiscovery failed (${bleLogDetail(e)})');
       _scheduleReconnect();

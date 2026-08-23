@@ -7,10 +7,13 @@ import 'package:flutter/material.dart';
 import '../shared/ble_protocol.dart';
 import 'bot_link.dart';
 import 'brain/brain_session.dart';
+import 'brain/model_download.dart';
 import 'brain/transcript.dart';
 import 'companion_controller.dart';
 import 'oem_guidance_page.dart';
 import 'service/service_ipc.dart';
+import 'setup/companion_setup.dart';
+import 'setup/companion_setup_page.dart';
 
 class CompanionPage extends StatefulWidget {
   const CompanionPage({super.key});
@@ -38,13 +41,15 @@ class _CompanionPageState extends State<CompanionPage>
     // Coming back from system settings (Notification access, battery):
     // re-read the native state so the cards update without a restart.
     if (state == AppLifecycleState.resumed) {
-      _controller.refreshOemDiagnostics();
+      _controller.refreshSetupFacts();
     }
   }
 
   /// One-time push of the keep-alive guidance after the controller detects
   /// that this phone's cleaner force-stopped the service (vivo/iQOO).
+  /// Only after setup unlocks — mid-wizard the OEM step already covers this.
   void _maybeShowOemGuidance() {
+    if (_controller.setupStep != CompanionSetupStep.done) return;
     if (!_controller.oemGuidancePending || _oemGuidancePushed) return;
     _oemGuidancePushed = true;
     _controller.markOemGuidanceShown();
@@ -67,44 +72,63 @@ class _CompanionPageState extends State<CompanionPage>
 
   @override
   Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: _controller,
+      builder: (context, _) {
+        final c = _controller;
+        if (!c.setupFactsLoaded) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+        if (c.setupStep != CompanionSetupStep.done) {
+          return CompanionSetupPage(controller: c);
+        }
+        return _CompanionDebugPanel(controller: c);
+      },
+    );
+  }
+}
+
+class _CompanionDebugPanel extends StatelessWidget {
+  const _CompanionDebugPanel({required this.controller});
+  final CompanionController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    final s = c.snapshot;
     return Scaffold(
       appBar: AppBar(title: const Text('Companion (central)')),
-      body: ListenableBuilder(
-        listenable: _controller,
-        builder: (context, _) {
-          final c = _controller;
-          final s = c.snapshot;
-          return Column(
-            children: [
-              if (c.phaseError != null) _ErrorBanner(message: c.phaseError!),
-              if (s?.linkError != null) _ErrorBanner(message: s!.linkError!),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: [
-                    _ServiceCard(controller: c),
-                    const SizedBox(height: 12),
-                    _AndroidLinkCard(controller: c),
-                    if (s != null) ...[
-                      const SizedBox(height: 12),
-                      _LinkCard(snapshot: s),
-                      const SizedBox(height: 12),
-                      _BrainCard(controller: c, snapshot: s),
-                      const SizedBox(height: 12),
-                      _AudioCard(controller: c, snapshot: s),
-                      const SizedBox(height: 12),
-                      _ControlCard(controller: c, snapshot: s),
-                      const SizedBox(height: 12),
-                      _TranscriptCard(controller: c, snapshot: s),
-                      const SizedBox(height: 12),
-                      _ActivityCard(snapshot: s),
-                    ],
-                  ],
-                ),
-              ),
-            ],
-          );
-        },
+      body: Column(
+        children: [
+          if (c.phaseError != null) _ErrorBanner(message: c.phaseError!),
+          if (s?.linkError != null) _ErrorBanner(message: s!.linkError!),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                _ServiceCard(controller: c),
+                const SizedBox(height: 12),
+                _AndroidLinkCard(controller: c),
+                if (s != null) ...[
+                  const SizedBox(height: 12),
+                  _LinkCard(snapshot: s),
+                  const SizedBox(height: 12),
+                  _BrainCard(controller: c, snapshot: s),
+                  const SizedBox(height: 12),
+                  _AudioCard(controller: c, snapshot: s),
+                  const SizedBox(height: 12),
+                  _ControlCard(controller: c, snapshot: s),
+                  const SizedBox(height: 12),
+                  _TranscriptCard(controller: c, snapshot: s),
+                  const SizedBox(height: 12),
+                  _ActivityCard(snapshot: s),
+                ],
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -156,8 +180,6 @@ class _ServiceCard extends StatelessWidget {
     final c = controller;
     final phaseLabel = switch (c.phase) {
       CompanionUiPhase.idle => 'Idle',
-      CompanionUiPhase.requestingPermissions => 'Requesting permissions…',
-      CompanionUiPhase.permissionDenied => 'Bluetooth permission denied',
       CompanionUiPhase.startingService => 'Starting service…',
       CompanionUiPhase.running => 'Service running',
       CompanionUiPhase.stopped => 'Service stopped',
@@ -432,7 +454,12 @@ class _BrainCard extends StatelessWidget {
             ),
             if (s.downloadPercent != null) ...[
               const SizedBox(height: 8),
-              Text('Downloading model ${s.downloadPercent}%'),
+              Text(
+                downloadProgressLabel(
+                  s.downloadPercent!,
+                  s.downloadRemainingSec,
+                ),
+              ),
               LinearProgressIndicator(
                 value: s.downloadPercent! / 100,
               ),

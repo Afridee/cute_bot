@@ -53,6 +53,7 @@ sealed class UiCommand {
           millis: _asInt(raw['millis']) ?? 1200),
       'clearTranscript' => const ClearTranscriptUiCommand(),
       'requestSnapshot' => const RequestSnapshotUiCommand(),
+      'retryBrain' => const RetryBrainUiCommand(),
       'setPhoneAlerts' => SetPhoneAlertsUiCommand(raw['enabled'] == true),
       'phoneAlert' => PhoneAlertUiCommand(
           packageName: raw['pkg'] is String ? raw['pkg'] as String : '',
@@ -140,6 +141,13 @@ final class RequestSnapshotUiCommand extends UiCommand {
   const RequestSnapshotUiCommand();
   @override
   Map<String, Object?> toMap() => {'cmd': 'requestSnapshot'};
+}
+
+/// Re-run brain warm-up after a failed download / load.
+final class RetryBrainUiCommand extends UiCommand {
+  const RetryBrainUiCommand();
+  @override
+  Map<String, Object?> toMap() => {'cmd': 'retryBrain'};
 }
 
 /// Toggle "show phone alerts on bot". The service persists the choice so it
@@ -252,6 +260,7 @@ final class ServiceSnapshot {
     required this.brainError,
     required this.brainKind,
     this.downloadPercent,
+    this.downloadRemainingSec,
     this.lastLatency,
     required this.replayedEntries,
     required this.droppedUtterances,
@@ -286,6 +295,9 @@ final class ServiceSnapshot {
   final String? brainError;
   final String brainKind;
   final int? downloadPercent;
+
+  /// Seconds left on the model pull. Null until percent/elapsed are enough.
+  final int? downloadRemainingSec;
   final LatencyTrace? lastLatency;
   final int replayedEntries;
   final int droppedUtterances;
@@ -327,6 +339,7 @@ final class ServiceSnapshot {
         'brainError': brainError,
         'brainKind': brainKind,
         'dlPct': downloadPercent,
+        'dlLeft': downloadRemainingSec,
         'latency': lastLatency?.toMap(),
         'replayed': replayedEntries,
         'dropped': droppedUtterances,
@@ -366,6 +379,7 @@ final class ServiceSnapshot {
       brainKind:
           raw['brainKind'] is String ? raw['brainKind'] as String : 'unknown',
       downloadPercent: _asInt(raw['dlPct']),
+      downloadRemainingSec: _asInt(raw['dlLeft']),
       lastLatency: LatencyTrace.fromMap(raw['latency']),
       replayedEntries: _asInt(raw['replayed']) ?? 0,
       droppedUtterances: _asInt(raw['dropped']) ?? 0,

@@ -48,6 +48,7 @@ final class BotTaskHandler extends TaskHandler {
   TranscriptStore? _transcript;
   GemmaBrain? _gemma;
   late UtteranceReassembler _reassembler;
+  bool _bringUp = false;
   final List<StreamSubscription> _subscriptions = [];
   final SequenceCounter _controlSeq = SequenceCounter();
   final DateTime _startedAt = DateTime.now();
@@ -109,6 +110,21 @@ final class BotTaskHandler extends TaskHandler {
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    if (_bringUp) {
+      Log.w(_tag, 'onStart re-entered; keeping existing session');
+      return;
+    }
+    _bringUp = true;
+    try {
+      await _bringUpService(starter);
+    } catch (e, stack) {
+      _bringUp = false;
+      Log.e(_tag, 'onStart failed', e, stack);
+      rethrow;
+    }
+  }
+
+  Future<void> _bringUpService(TaskStarter starter) async {
     Log.i(_tag, 'service starting (starter: ${starter.name})');
     _logActivity('Service started (${starter.name})');
 
@@ -170,7 +186,9 @@ final class BotTaskHandler extends TaskHandler {
   @override
   void onRepeatEvent(DateTime timestamp) {
     // Heartbeat: even with no state churn the UI gets a fresh snapshot,
-    // and a human tailing logcat sees the service is alive.
+    // and a human tailing logcat sees the service is alive. Also cycle a
+    // scan that came up after process resurrection but never hears the bot.
+    _link?.onHeartbeat();
     _pushSnapshot(force: true);
   }
 
@@ -186,7 +204,11 @@ final class BotTaskHandler extends TaskHandler {
     }
     _reassembler.reset();
     _session?.dispose();
+    _session = null;
+    _gemma = null;
     _link?.dispose();
+    _link = null;
+    _bringUp = false;
     if (_playbackReady) {
       unawaited(FlutterPcmSound.release());
     }
@@ -244,6 +266,9 @@ final class BotTaskHandler extends TaskHandler {
         _onPhoneAlert(packageName, category);
       case RequestSnapshotUiCommand():
         break; // snapshot goes out below either way
+      case RetryBrainUiCommand():
+        _logActivity('Retrying brain warm-up');
+        unawaited(_session?.start());
     }
     _pushSnapshot(force: true);
   }
@@ -624,6 +649,7 @@ final class BotTaskHandler extends TaskHandler {
       brainError: session?.lastError,
       brainKind: _gemma?.kind ?? 'FakeBrain',
       downloadPercent: _gemma?.downloadPercent,
+      downloadRemainingSec: _gemma?.downloadRemainingSec,
       lastLatency: _gemma?.lastLatency,
       replayedEntries: session?.replayedEntries ?? 0,
       droppedUtterances: session?.droppedUtterances ?? 0,

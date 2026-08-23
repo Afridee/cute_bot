@@ -2,7 +2,12 @@
 // standing in for the ESP32 until hardware exists.
 //
 // Responsibilities:
-// - advertise the bot service, accept a companion/scanner connection
+// - advertise the bot service, accept a companion/scanner connection,
+//   then start advertising again when the last central disconnects
+//   (Android stops connectable ads on attach; without a restart the
+//   companion's post-drop scan never sees the bot). After an abrupt
+//   companion kill, cancelConnection + advertise retry + GATT republish
+//   recover the same way a Bluetooth toggle does.
 // - push-to-talk: stream mic audio out as ADPCM chunks (audioFromBot)
 // - accept audio in (audioToBot) and play it on the phone speaker
 // - accept control writes and reflect them on screen (LED box, log)
@@ -22,6 +27,7 @@ import '../shared/adpcm.dart';
 import '../shared/audio_transport.dart';
 import '../shared/ble_protocol.dart';
 import '../shared/log.dart';
+import 'advertise_recovery.dart';
 
 const String _tag = 'Simulator';
 
@@ -65,6 +71,11 @@ final class SimulatorController extends ChangeNotifier {
   bool advertising = false;
   String? fatalError; // unrecoverable for this session (e.g. unauthorized)
 
+  /// Centrals with a live ACL, keyed by central UUID string. Notify
+  /// subscriber maps can lag or stay populated after an abrupt kill;
+  /// advertising decisions use this, not CCCD state.
+  final Map<String, Central> _connectedCentrals = {};
+
   /// Centrals currently subscribed to each notify characteristic,
   /// keyed by central UUID string.
   final Map<String, Central> _audioSubscribers = {};
@@ -72,8 +83,7 @@ final class SimulatorController extends ChangeNotifier {
   final Map<String, int> mtuByCentral = {};
 
   int get subscriberCount => _audioSubscribers.length;
-  bool get hasConnection =>
-      _audioSubscribers.isNotEmpty || _telemetrySubscribers.isNotEmpty;
+  bool get hasConnection => _connectedCentrals.isNotEmpty;
 
   // LED as commanded over the control characteristic.
   int ledRed = 0, ledGreen = 0, ledBlue = 0;
@@ -84,6 +94,27 @@ final class SimulatorController extends ChangeNotifier {
 
   bool talking = false;
   int micFramesSent = 0;
+
+  /// GATT services are published once per radio-on session. Re-advertising
+  /// after a disconnect must not tear them down (`removeAllServices` would
+  /// drop an in-flight companion reconnect).
+  bool _servicesPublished = false;
+
+  /// Bumped so a late `startAdvertising` from an older disconnect cannot
+  /// race a new central or a radio-off.
+  int _advertiseEpoch = 0;
+
+  /// Consecutive failed advertise attempts in this idle stretch.
+  int _advertiseFailures = 0;
+
+  Timer? _advertiseWatchdog;
+  Timer? _idleAdvertiseRefresh;
+  bool _advertiseInFlight = false;
+
+  /// True after a central leaves until one attaches again. Drives the idle
+  /// advertise refresh so a "successful" startAdvertising that is not
+  /// actually connectable cannot hide the bot until a Bluetooth toggle.
+  bool _expectingCompanion = false;
 
   bool receivingAudio = false;
   int audioFramesReceived = 0;
@@ -107,10 +138,10 @@ final class SimulatorController extends ChangeNotifier {
 
   // --- GATT plumbing ---
 
-  late final GATTCharacteristic _audioFromBotChar;
-  late final GATTCharacteristic _audioToBotChar;
-  late final GATTCharacteristic _controlChar;
-  late final GATTCharacteristic _telemetryChar;
+  late GATTCharacteristic _audioFromBotChar;
+  late GATTCharacteristic _audioToBotChar;
+  late GATTCharacteristic _controlChar;
+  late GATTCharacteristic _telemetryChar;
 
   final SequenceCounter _audioOutSeq = SequenceCounter();
   final SequenceCounter _telemetrySeq = SequenceCounter();
@@ -148,16 +179,37 @@ final class SimulatorController extends ChangeNotifier {
           '${_shortId(e.central)} ${connected ? 'connected' : 'disconnected'}');
       final id = e.central.uuid.toString();
       if (connected) {
+        _connectedCentrals[id] = e.central;
         // Phone-to-phone: the companion's CCCD write often never ACKs on
         // OEM Android stacks, so characteristicNotifyStateChanged never
         // fires. Treat a connected central as subscribed; nRF Connect
         // still toggles via _onNotifyState when CCCD does arrive.
         _audioSubscribers[id] = e.central;
         _telemetrySubscribers[id] = e.central;
+        // A late advertise retry must not start while a central is attached.
+        _expectingCompanion = false;
+        _cancelAdvertiseWatchdog(bumpEpoch: true);
+        _advertiseFailures = 0;
+        // Android stops connectable advertising when a central attaches.
+        // Keep the chip honest; we restart ads when the last one leaves.
+        if (advertising) {
+          advertising = false;
+          _logActivity('Advertising stopped (companion connected)');
+          Log.i(_tag, 'advertising stopped (central connected)');
+        }
       } else {
+        _connectedCentrals.remove(id);
         _audioSubscribers.remove(id);
         _telemetrySubscribers.remove(id);
         mtuByCentral.remove(id);
+        // cancelConnection after STATE_DISCONNECTED is what actually
+        // releases a bonded/ghost GATT session. Without it, connectable
+        // ads fail or are not connectable until the user toggles BT.
+        unawaited(_releaseCentral(e.central));
+        if (!hasConnection) {
+          _expectingCompanion = true;
+          _scheduleAdvertiseRecovery();
+        }
       }
       notifyListeners();
     }));
@@ -192,11 +244,20 @@ final class SimulatorController extends ChangeNotifier {
         }
       case BluetoothLowEnergyState.poweredOn:
         fatalError = null;
-        await _publishAndAdvertise();
+        if (_servicesPublished) {
+          _scheduleAdvertiseRecovery();
+        } else {
+          await _publishAndAdvertise();
+        }
       case BluetoothLowEnergyState.poweredOff:
         // Bluetooth toggled off: drop session state; we re-advertise on
         // the next poweredOn event.
+        _cancelAdvertiseWatchdog(bumpEpoch: true);
         advertising = false;
+        _servicesPublished = false;
+        _advertiseFailures = 0;
+        _expectingCompanion = true;
+        _connectedCentrals.clear();
         _audioSubscribers.clear();
         _telemetrySubscribers.clear();
         mtuByCentral.clear();
@@ -210,7 +271,8 @@ final class SimulatorController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _publishAndAdvertise() async {
+  Future<void> _publishAndAdvertise({bool scheduleOnFailure = true}) async {
+    if (_disposed || hasConnection) return;
     try {
       await _peripheral.removeAllServices();
 
@@ -258,20 +320,214 @@ final class SimulatorController extends ChangeNotifier {
           _telemetryChar,
         ],
       ));
-
-      await _peripheral.startAdvertising(Advertisement(
-        name: kAdvertisedName,
-        serviceUUIDs: [UUID.fromString(BotUuids.service)],
-      ));
-      advertising = true;
-      _logActivity('Advertising as $kAdvertisedName');
-      Log.i(_tag, 'advertising started');
+      _servicesPublished = true;
+      final started = await _startAdvertising();
+      if (!started && !hasConnection && scheduleOnFailure) {
+        _scheduleAdvertiseRecovery();
+      }
     } catch (e) {
       advertising = false;
       _logActivity('Advertising failed: $e');
       Log.e(_tag, 'failed to publish service / advertise', e);
+      notifyListeners();
+      if (scheduleOnFailure && !hasConnection) {
+        _scheduleAdvertiseRecovery();
+      }
     }
+  }
+
+  /// Arms the advertise watchdog. First try after a drop waits
+  /// [kAdvertiseResumeDelay] so the ACL can finish teardown.
+  void _scheduleAdvertiseRecovery() {
+    if (_disposed || hasConnection) return;
+    if (radioState != BluetoothLowEnergyState.poweredOn) return;
+    if (advertising) return;
+    if (_advertiseWatchdog != null) return;
+    final delay = advertiseRetryDelay(_advertiseFailures);
+    Log.i(_tag, 'advertise recovery in $delay (failures=$_advertiseFailures)');
+    _advertiseWatchdog = Timer(delay, () {
+      _advertiseWatchdog = null;
+      unawaited(_runAdvertiseRecovery());
+    });
+  }
+
+  void _cancelAdvertiseWatchdog({required bool bumpEpoch}) {
+    _advertiseWatchdog?.cancel();
+    _advertiseWatchdog = null;
+    _idleAdvertiseRefresh?.cancel();
+    _idleAdvertiseRefresh = null;
+    if (bumpEpoch) {
+      _advertiseEpoch++;
+    }
+  }
+
+  void _armIdleAdvertiseRefresh() {
+    _idleAdvertiseRefresh?.cancel();
+    _idleAdvertiseRefresh = null;
+    if (_disposed || !_expectingCompanion || hasConnection || !advertising) {
+      return;
+    }
+    _idleAdvertiseRefresh = Timer(kIdleAdvertiseRefresh, () {
+      _idleAdvertiseRefresh = null;
+      if (_disposed || !_expectingCompanion || hasConnection) return;
+      Log.i(_tag,
+          'idle advertise refresh (no central for $kIdleAdvertiseRefresh)');
+      _logActivity('Refreshing ads (no companion yet)');
+      advertising = false;
+      notifyListeners();
+      // Ads reported success but nobody attached — same symptom as a
+      // ghost GATT session. Rebuild the server; retry-advertise alone
+      // would succeed again and reset the failure count.
+      _advertiseFailures = kAdvertiseFailuresBeforeRepublish;
+      _scheduleAdvertiseRecovery();
+    });
+  }
+
+  Future<void> _runAdvertiseRecovery() async {
+    if (_advertiseInFlight) return;
+    if (_disposed || hasConnection || advertising) return;
+    if (radioState != BluetoothLowEnergyState.poweredOn) return;
+
+    _advertiseInFlight = true;
+    final epoch = ++_advertiseEpoch;
+    try {
+      await _releaseStaleCentrals();
+      if (_disposed || epoch != _advertiseEpoch) return;
+      if (hasConnection || radioState != BluetoothLowEnergyState.poweredOn) {
+        return;
+      }
+
+      final action = advertiseRecoveryAction(_advertiseFailures);
+      final started = switch (action) {
+        AdvertiseRecoveryAction.republishServices =>
+          await _republishServicesAndAdvertise(),
+        AdvertiseRecoveryAction.retryAdvertise => await _startAdvertising(),
+      };
+      if (_disposed || epoch != _advertiseEpoch) return;
+      if (started) {
+        _advertiseFailures = 0;
+        return;
+      }
+      _advertiseFailures += 1;
+      _scheduleAdvertiseRecovery();
+    } finally {
+      _advertiseInFlight = false;
+    }
+  }
+
+  /// Tear down and rebuild the GATT database — the path a Bluetooth toggle
+  /// takes — then advertise. Only used after repeated advertise failures
+  /// so an in-flight companion reconnect is not dropped on the first miss.
+  Future<bool> _republishServicesAndAdvertise() async {
+    _logActivity('Re-publishing GATT (advertise recovery)');
+    Log.w(_tag, 'republishing GATT after $_advertiseFailures advertise misses');
+    try {
+      await _peripheral.stopAdvertising();
+    } catch (_) {}
+    if (_disposed || hasConnection) return false;
+    advertising = false;
+    _servicesPublished = false;
+    await _publishAndAdvertise(scheduleOnFailure: false);
+    return advertising;
+  }
+
+  Future<void> _releaseCentral(Central central) async {
+    try {
+      await _peripheral.disconnect(central);
+    } catch (e) {
+      Log.w(_tag, 'cancelConnection failed for ${_shortId(central)}: $e');
+    }
+  }
+
+  /// Android can keep a bonded central in GATT_SERVER's connected list after
+  /// the Dart disconnect event. Connectable ads will not stick until those
+  /// sessions are cancelled.
+  Future<void> _releaseStaleCentrals() async {
+    final List<Central> leftover;
+    try {
+      leftover = await _peripheral.retrieveConnectedCentrals();
+    } catch (e) {
+      Log.w(_tag, 'retrieveConnectedCentrals failed: $e');
+      return;
+    }
+    var released = 0;
+    for (final central in leftover) {
+      final id = central.uuid.toString();
+      if (_connectedCentrals.containsKey(id)) continue;
+      try {
+        await _peripheral.disconnect(central);
+        released += 1;
+        Log.i(_tag, 'released stale central ${_shortId(central)}');
+      } catch (e) {
+        Log.w(_tag, 'failed to release ${_shortId(central)}: $e');
+      }
+    }
+    if (released > 0) {
+      _logActivity('Released $released stale GATT session(s)');
+      await Future<void>.delayed(kAdvertiseResumeDelay);
+    }
+  }
+
+  bool get _canAdvertise =>
+      !_disposed &&
+      _servicesPublished &&
+      radioState == BluetoothLowEnergyState.poweredOn &&
+      !hasConnection;
+
+  /// A central can attach (or the radio can drop) while start/stop
+  /// advertising is in flight. Leave ads off if we are no longer idle.
+  Future<bool> _abandonAdvertisingIfStale() async {
+    if (_canAdvertise) return false;
+    try {
+      await _peripheral.stopAdvertising();
+    } catch (_) {}
+    advertising = false;
+    return true;
+  }
+
+  Future<bool> _commitAdvertisingStart({required bool restarted}) async {
+    if (await _abandonAdvertisingIfStale()) return false;
+    advertising = true;
+    _advertiseFailures = 0;
+    _logActivity('Advertising as $kAdvertisedName');
+    Log.i(_tag, restarted ? 'advertising restarted' : 'advertising started');
     notifyListeners();
+    _armIdleAdvertiseRefresh();
+    return true;
+  }
+
+  Future<bool> _startAdvertising() async {
+    if (!_canAdvertise) return false;
+    // Always stop first: Android auto-stops ads on connect, but the
+    // advertiser callback can still be registered. Starting again without
+    // an explicit stop fails with ADVERTISE_FAILED_ALREADY_STARTED.
+    try {
+      await _peripheral.stopAdvertising();
+    } catch (_) {}
+    if (!_canAdvertise) return false;
+    try {
+      await _peripheral.startAdvertising(Advertisement(
+        name: kAdvertisedName,
+        serviceUUIDs: [UUID.fromString(BotUuids.service)],
+      ));
+      return _commitAdvertisingStart(restarted: false);
+    } catch (e) {
+      try {
+        await _peripheral.stopAdvertising();
+        if (!_canAdvertise) return false;
+        await _peripheral.startAdvertising(Advertisement(
+          name: kAdvertisedName,
+          serviceUUIDs: [UUID.fromString(BotUuids.service)],
+        ));
+        return _commitAdvertisingStart(restarted: true);
+      } catch (e2) {
+        advertising = false;
+        _logActivity('Advertising failed: $e2');
+        Log.e(_tag, 'failed to advertise', e2);
+        notifyListeners();
+        return false;
+      }
+    }
   }
 
   // --- inbound GATT events ---
@@ -667,6 +923,7 @@ final class SimulatorController extends ChangeNotifier {
   }
 
   Future<void> _teardown() async {
+    _cancelAdvertiseWatchdog(bumpEpoch: true);
     await _stopTalkingInternal(notifyPeers: false);
     for (final sub in _bleSubscriptions) {
       await sub.cancel();

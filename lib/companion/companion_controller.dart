@@ -7,6 +7,7 @@
 //   — these need an Activity, which the service never has
 // - starting/attaching-to/stopping the service
 // - rendering the latest ServiceSnapshot pushed over the task channel
+// - first-run setup facts (Docs/companion-setup.md)
 //
 // Deliberately NOT here anymore: BotLink, audio, the brain. Killing this
 // object (or the whole Activity) must not kill the bot.
@@ -23,17 +24,13 @@ import 'companion_device_link.dart';
 import 'oem_care.dart';
 import 'service/bot_service.dart';
 import 'service/service_ipc.dart';
+import 'setup/companion_setup.dart';
 
 const String _tag = 'CompanionUi';
 
 /// Where the controller is in its bring-up sequence.
 enum CompanionUiPhase {
   idle,
-  requestingPermissions,
-
-  /// BLE permission denied — the service would sit unauthorized forever,
-  /// so we do not start it. Terminal until the user grants.
-  permissionDenied,
   startingService,
 
   /// Service running (or attached to an already-running one); snapshots
@@ -75,18 +72,64 @@ final class CompanionController extends ChangeNotifier {
   /// an Activity, same as the permission flows.
   final CompanionDeviceLink companionLink = CompanionDeviceLink();
 
+  /// Compile-time FakeBrain: setup omits the 2.6 GB wait.
+  static const bool fakeBrain = bool.fromEnvironment('CUTEBOT_FAKE_BRAIN');
+
+  bool setupFactsLoaded = false;
+  bool welcomeSeen = false;
+  bool notificationsGranted = false;
+  bool notificationPermanentlyDenied = false;
+  bool oemKeepAliveAcknowledged = false;
+  bool oemKeepAliveSkipped = false;
+  bool cdmSkipped = false;
+
+  BluetoothLowEnergyState radioState = BluetoothLowEnergyState.unknown;
+
+  bool get bleAuthorized =>
+      radioState == BluetoothLowEnergyState.poweredOn ||
+      radioState == BluetoothLowEnergyState.poweredOff;
+
+  bool get bluetoothOn => radioState == BluetoothLowEnergyState.poweredOn;
+
+  bool get brainReady =>
+      snapshot != null && companionBrainIsReady(snapshot!.brainState);
+
+  CompanionSetupFacts get setupFacts => CompanionSetupFacts(
+        welcomeSeen: welcomeSeen,
+        notificationsGranted: notificationsGranted,
+        bleAuthorized: bleAuthorized,
+        bluetoothOn: bluetoothOn,
+        batteryUnrestricted: batteryOptimizationExempt,
+        notificationAccessGranted: notificationAccessGranted,
+        isAggressiveOem: isAggressiveOem,
+        oemKeepAliveAcknowledged: oemKeepAliveAcknowledged,
+        oemKeepAliveSkipped: oemKeepAliveSkipped,
+        cdmAssociated: companionLink.state.associated,
+        cdmSkipped: cdmSkipped,
+        brainReady: brainReady,
+        fakeBrain: fakeBrain,
+      );
+
+  CompanionSetupStep get setupStep => resolveCompanionSetupStep(setupFacts);
+
+  bool get canStartService => notificationsGranted && bluetoothOn;
+
   bool _started = false;
   bool _disposed = false;
+  bool _startingService = false;
 
-  /// Persisted marker: the battery-exemption dialog was already offered
-  /// once on this install. Ask once, don't nag (M2.5) — the manual
-  /// "Allow background" button in the UI remains for later minds.
-  static const String _batteryPromptedKey = 'batteryExemptionPrompted';
+  final CentralManager _central = CentralManager();
+  StreamSubscription<BluetoothLowEnergyStateChangedEventArgs>? _radioSub;
 
   /// Persisted marker: the OEM keep-alive guidance page was already shown
   /// once on this install. Same ask-once policy as the battery prompt; the
   /// "Keep-alive tips" button in the UI remains for later minds.
   static const String _oemGuidanceShownKey = 'oemGuidanceShown';
+
+  static const String _welcomeSeenKey = 'setupWelcomeSeen';
+  static const String _oemAckKey = 'oemKeepAliveAcknowledged';
+  static const String _oemSkipKey = 'oemKeepAliveSkipped';
+  static const String _cdmSkipKey = 'cdmSkipped';
 
   Future<void> start() async {
     if (_started) return;
@@ -94,6 +137,7 @@ final class CompanionController extends ChangeNotifier {
 
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
     _initService();
+    _bindRadio();
 
     // CDM association state (M2.5): refresh also re-arms presence
     // observation natively. Fire-and-forget; the card renders when ready.
@@ -107,6 +151,13 @@ final class CompanionController extends ChangeNotifier {
     // can't hide the death); if set on an aggressive OEM, teach the user
     // once via the guidance page.
     await _checkOemKiller();
+    await _loadSetupFlags();
+    await _refreshNotificationPermission();
+    await _refreshBatteryOptimization();
+    await _refreshRadio();
+
+    setupFactsLoaded = true;
+    notifyListeners();
 
     // Attach path: service already running (started earlier, or auto-
     // restarted after kill/boot). Don't redo permissions, just listen.
@@ -114,73 +165,63 @@ final class CompanionController extends ChangeNotifier {
       Log.i(_tag, 'attaching to already-running service');
       phase = CompanionUiPhase.running;
       _send(const RequestSnapshotUiCommand());
-      unawaited(_refreshBatteryOptimization());
       notifyListeners();
       return;
     }
 
-    phase = CompanionUiPhase.requestingPermissions;
-    notifyListeners();
+    // Returning user / mid-wizard: start as soon as notification + BLE
+    // are already true so the model can download in parallel.
+    if (canStartService) {
+      await ensureServiceStarted();
+    }
+  }
 
-    // Notification permission (Android 13+): without it the foreground
-    // service still runs but its notification is invisible; ask once.
+  void _bindRadio() {
+    _radioSub ??= _central.stateChanged.listen((event) {
+      radioState = event.state;
+      if (canStartService) unawaited(ensureServiceStarted());
+      if (!_disposed) notifyListeners();
+    });
+  }
+
+  Future<void> _refreshRadio() async {
     try {
-      final status = await FlutterForegroundTask.checkNotificationPermission();
-      if (status != NotificationPermission.granted) {
-        await FlutterForegroundTask.requestNotificationPermission();
+      var state = _central.state;
+      if (state == BluetoothLowEnergyState.unknown) {
+        state = await _central.stateChanged
+            .map((e) => e.state)
+            .firstWhere((s) => s != BluetoothLowEnergyState.unknown)
+            .timeout(const Duration(seconds: 3),
+                onTimeout: () => _central.state);
       }
+      radioState = state;
     } catch (e) {
-      Log.w(_tag, 'notification permission flow failed: $e');
+      Log.w(_tag, 'radio state read failed: $e');
     }
+  }
 
-    // BLE permission MUST be granted here: the service isolate has no
-    // Activity and cannot show the dialog (bluetooth_low_energy authorize()
-    // is Activity-bound).
-    final bleGranted = await _ensureBlePermission();
-    if (!bleGranted) {
-      phase = CompanionUiPhase.permissionDenied;
-      phaseError = 'Bluetooth permission is required. Grant it in settings, '
-          'then come back.';
-      notifyListeners();
-      return;
+  Future<void> _loadSetupFlags() async {
+    welcomeSeen = await _readFlag(_welcomeSeenKey);
+    oemKeepAliveAcknowledged = await _readFlag(_oemAckKey);
+    oemKeepAliveSkipped = await _readFlag(_oemSkipKey);
+    cdmSkipped = await _readFlag(_cdmSkipKey);
+  }
+
+  Future<bool> _readFlag(String key) async {
+    try {
+      return await FlutterForegroundTask.getData<bool>(key: key) ?? false;
+    } catch (e) {
+      Log.w(_tag, '$key read failed: $e');
+      return false;
     }
+  }
 
-    // Battery-optimization exemption: OEM battery managers are one of the
-    // two documented killers of this service. Ask ONCE per install; a
-    // refusal is remembered and never re-prompted (the "Allow background"
-    // button stays available in the UI).
-    await _refreshBatteryOptimization();
-    if (!batteryOptimizationExempt && !await _batteryPromptAlreadyOffered()) {
-      try {
-        await FlutterForegroundTask.saveData(
-            key: _batteryPromptedKey, value: true);
-        await FlutterForegroundTask.requestIgnoreBatteryOptimization();
-        await _refreshBatteryOptimization();
-      } catch (e) {
-        Log.w(_tag, 'battery optimization request failed: $e');
-      }
+  Future<void> _writeFlag(String key, bool value) async {
+    try {
+      await FlutterForegroundTask.saveData(key: key, value: value);
+    } catch (e) {
+      Log.w(_tag, '$key write failed: $e');
     }
-
-    phase = CompanionUiPhase.startingService;
-    notifyListeners();
-
-    final result = await FlutterForegroundTask.startService(
-      serviceId: 1007,
-      serviceTypes: [ForegroundServiceTypes.connectedDevice],
-      notificationTitle: 'Cute Bot',
-      notificationText: 'starting…',
-      callback: botServiceStartCallback,
-    );
-    if (result is ServiceRequestFailure) {
-      phase = CompanionUiPhase.stopped;
-      phaseError = 'Service failed to start: ${result.error}';
-      Log.e(_tag, 'startService failed', result.error);
-    } else {
-      phase = CompanionUiPhase.running;
-      phaseError = null;
-      _send(const RequestSnapshotUiCommand());
-    }
-    notifyListeners();
   }
 
   void _initService() {
@@ -221,29 +262,6 @@ final class CompanionController extends ChangeNotifier {
     );
   }
 
-  Future<bool> _ensureBlePermission() async {
-    try {
-      final central = CentralManager();
-      var state = central.state;
-      if (state == BluetoothLowEnergyState.unknown) {
-        // Platform side may still be initializing; wait for the first real
-        // state, bounded.
-        state = await central.stateChanged
-            .map((e) => e.state)
-            .firstWhere((s) => s != BluetoothLowEnergyState.unknown)
-            .timeout(const Duration(seconds: 3),
-                onTimeout: () => central.state);
-      }
-      if (state == BluetoothLowEnergyState.unauthorized) {
-        return await central.authorize();
-      }
-      return state != BluetoothLowEnergyState.unsupported;
-    } catch (e) {
-      Log.e(_tag, 'BLE permission check failed', e);
-      return false;
-    }
-  }
-
   Future<void> _checkOemKiller() async {
     oemDiagnostics = await OemCare.diagnostics();
     final diag = oemDiagnostics;
@@ -266,23 +284,8 @@ final class CompanionController extends ChangeNotifier {
   /// pending flag and persists ask-once, even if the user backs right out.
   Future<void> markOemGuidanceShown() async {
     oemGuidancePending = false;
-    try {
-      await FlutterForegroundTask.saveData(
-          key: _oemGuidanceShownKey, value: true);
-    } catch (e) {
-      Log.w(_tag, 'OEM guidance flag write failed: $e');
-    }
-  }
-
-  Future<bool> _batteryPromptAlreadyOffered() async {
-    try {
-      return await FlutterForegroundTask.getData<bool>(
-              key: _batteryPromptedKey) ??
-          false;
-    } catch (e) {
-      Log.w(_tag, 'battery prompt flag read failed: $e');
-      return false;
-    }
+    await _writeFlag(_oemGuidanceShownKey, true);
+    if (!_disposed) notifyListeners();
   }
 
   Future<void> _refreshBatteryOptimization() async {
@@ -295,6 +298,48 @@ final class CompanionController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  Future<void> _refreshNotificationPermission() async {
+    try {
+      final status = await FlutterForegroundTask.checkNotificationPermission();
+      notificationsGranted = status == NotificationPermission.granted;
+      notificationPermanentlyDenied =
+          status == NotificationPermission.permanently_denied;
+    } catch (e) {
+      Log.w(_tag, 'notification permission check failed: $e');
+    }
+  }
+
+  Future<void> requestNotifications() async {
+    try {
+      final status = await FlutterForegroundTask.requestNotificationPermission();
+      notificationsGranted = status == NotificationPermission.granted;
+      notificationPermanentlyDenied =
+          status == NotificationPermission.permanently_denied;
+    } catch (e) {
+      Log.w(_tag, 'notification permission request failed: $e');
+    }
+    if (canStartService) unawaited(ensureServiceStarted());
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> requestBle() async {
+    try {
+      await _refreshRadio();
+      if (radioState == BluetoothLowEnergyState.unauthorized) {
+        await _central.authorize();
+        await _refreshRadio();
+      }
+    } catch (e) {
+      Log.e(_tag, 'BLE permission request failed', e);
+    }
+    if (canStartService) unawaited(ensureServiceStarted());
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> openAppSettings() => OemCare.openAppSettings();
+
+  Future<void> openBluetoothSettings() => OemCare.openBluetoothSettings();
+
   Future<void> requestBatteryExemption() async {
     try {
       await FlutterForegroundTask.requestIgnoreBatteryOptimization();
@@ -304,20 +349,88 @@ final class CompanionController extends ChangeNotifier {
     await _refreshBatteryOptimization();
   }
 
-  /// Re-reads the native diagnostics (notification access, sticky death
-  /// marker). Called when the app resumes, so granting Notification access
-  /// in system settings is reflected the moment the user comes back.
-  Future<void> refreshOemDiagnostics() async {
+  /// Re-reads native diagnostics, battery, notifications, and radio.
+  /// Called when the app resumes so settings grants land without a restart.
+  Future<void> refreshSetupFacts() async {
     final refreshed = await OemCare.diagnostics();
-    if (refreshed == null) return;
-    oemDiagnostics = refreshed;
-    notifyListeners();
+    if (refreshed != null) oemDiagnostics = refreshed;
+    await _refreshNotificationPermission();
+    await _refreshBatteryOptimization();
+    await _refreshRadio();
+    if (canStartService) unawaited(ensureServiceStarted());
+    if (!_disposed) notifyListeners();
   }
 
   /// Deep-link to the system Notification access screen. Manual button —
   /// available forever, unlike the ask-once auto-shown guidance.
   Future<void> openNotificationAccessSettings() =>
       OemCare.openNotificationAccessSettings();
+
+  Future<void> markWelcomeSeen() async {
+    welcomeSeen = true;
+    await _writeFlag(_welcomeSeenKey, true);
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> acknowledgeOemKeepAlive() async {
+    oemKeepAliveAcknowledged = true;
+    await _writeFlag(_oemAckKey, true);
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> skipOemKeepAlive() async {
+    oemKeepAliveSkipped = true;
+    await _writeFlag(_oemSkipKey, true);
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> skipCdm() async {
+    cdmSkipped = true;
+    await _writeFlag(_cdmSkipKey, true);
+    if (!_disposed) notifyListeners();
+  }
+
+  void retryBrain() => _send(const RetryBrainUiCommand());
+
+  /// Start the service once notification + Bluetooth are granted. Safe to
+  /// call repeatedly; no-ops if already running or still unauthorized.
+  Future<void> ensureServiceStarted() async {
+    if (_disposed || _startingService) return;
+    if (!canStartService) return;
+    if (phase == CompanionUiPhase.running) return;
+    if (await FlutterForegroundTask.isRunningService) {
+      phase = CompanionUiPhase.running;
+      _send(const RequestSnapshotUiCommand());
+      if (!_disposed) notifyListeners();
+      return;
+    }
+
+    _startingService = true;
+    phase = CompanionUiPhase.startingService;
+    phaseError = null;
+    notifyListeners();
+
+    final result = await FlutterForegroundTask.startService(
+      serviceId: 1007,
+      serviceTypes: [ForegroundServiceTypes.connectedDevice],
+      notificationTitle: 'Cute Bot',
+      notificationText: 'starting…',
+      callback: botServiceStartCallback,
+    );
+    _startingService = false;
+    if (_disposed) return;
+
+    if (result is ServiceRequestFailure) {
+      phase = CompanionUiPhase.stopped;
+      phaseError = 'Service failed to start: ${result.error}';
+      Log.e(_tag, 'startService failed', result.error);
+    } else {
+      phase = CompanionUiPhase.running;
+      phaseError = null;
+      _send(const RequestSnapshotUiCommand());
+    }
+    notifyListeners();
+  }
 
   /// Deliberate user stop — the only path that kills the bot on purpose.
   Future<void> stopService() async {
@@ -329,9 +442,11 @@ final class CompanionController extends ChangeNotifier {
 
   Future<void> restartService() async {
     phase = CompanionUiPhase.idle;
-    _started = false;
     snapshot = null;
-    await start();
+    if (await FlutterForegroundTask.isRunningService) {
+      await FlutterForegroundTask.stopService();
+    }
+    await ensureServiceStarted();
   }
 
   // --- commands through to the service ---
@@ -389,6 +504,7 @@ final class CompanionController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     // NOTE: the service keeps running — that is the whole point of M2.
+    unawaited(_radioSub?.cancel());
     FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
     companionLink.removeListener(notifyListeners);
     companionLink.dispose();

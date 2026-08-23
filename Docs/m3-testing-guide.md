@@ -11,11 +11,17 @@ simulator phone is the same as M1/M2.
 ## First launch (model download)
 
 1. `fvm flutter run` on the companion phone. Pick **Companion**.
-2. Grant BLE / notifications as in M2. Start the service.
-3. The Brain card shows **Gemma 4 E2B** and, on a cold install, a
-   download percentage. First warm-up is **minutes** (download) plus
-   **tens of seconds** (model load). Breathing-blue LEDs on the bot
-   mean warming; utterances during this window are dropped.
+2. A first-run wizard walks notifications, Bluetooth, battery,
+   Notification access, optional CDM link, then the brain download
+   (copy and gating: `Docs/companion-setup.md`). The service starts
+   after Bluetooth so the model can download during the later steps.
+   FakeBrain (`--dart-define=CUTEBOT_FAKE_BRAIN=true`) skips the
+   download wait. The debug panel only opens after the blocking steps.
+3. Once the panel is unlocked, the Brain card shows **Gemma 4 E2B**
+   and, if warm-up is still running, a download percentage. First
+   warm-up is **minutes** (download) plus **tens of seconds** (model
+   load). Breathing-blue LEDs on the bot mean warming; utterances
+   during this window are dropped.
 4. When the card says **Ready**, the model is in memory. Subsequent
    service restarts skip the download and only pay load + chat-create.
 

@@ -31,6 +31,7 @@ tools-as-the-bot's-body (full `BotActuator` + timer persistence).
 | `lib/companion/companion_device_link.dart` | M2.5: Dart wrapper over the CDM MethodChannel — associate / disassociate / state for the "Android link" card. |
 | `lib/companion/oem_care.dart` | M2.5: Dart face of OEM diagnostics — manufacturer/brand, sticky "service died behind our back" marker, Notification-access grant. |
 | `lib/companion/oem_guidance_page.dart` | M2.5: one-shot "Keep the bot alive" page for vivo/iQOO (Notification access first, then Recents lock / autostart / background power). Auto-shown after an unexpected death; always reachable via **Keep-alive tips**. |
+| `lib/companion/setup/` | First-run Companion setup in front of the debug panel. Order, copy, and block/skip rules: `Docs/companion-setup.md`. |
 | `android/app/src/main/kotlin/com/cutebot/cute_bot/` | M2.5 native layer. Restart funnel: `BotServiceStarter` (the one shared restart path). Wake sources: `BotPresenceService` (CDM, API 31+), `CuteBotNotificationListenerService` (isolated `:listener` process), `KeepAliveReceiver` (~60 s AlarmManager), `ServiceWatchdog` (15-min WorkManager). Cross-process: `CuteBotProcesses`, `DefaultProcessRelay`. Bind heal: `ListenerBindPoke`. OEM: `OemCareHandler`, `CuteBotApplication`. CDM chooser: `CompanionLinkHandler`. |
 
 ## Toolchain

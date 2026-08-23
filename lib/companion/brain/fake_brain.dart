@@ -35,6 +35,10 @@ final class FakeBrain implements BotBrain {
   bool _warm = false;
   bool _disposed = false;
   int _responseCounter = 0;
+  Future<void>? _warmUpInFlight;
+
+  /// How many times the delay body ran. Overlapping [warmUp] calls share one.
+  int warmUpRuns = 0;
 
   static final List<String Function(AudioClip clip)> _responses = [
     (clip) {
@@ -48,11 +52,18 @@ final class FakeBrain implements BotBrain {
   ];
 
   @override
-  Future<void> warmUp() async {
+  Future<void> warmUp() {
     if (_disposed) throw StateError('FakeBrain used after dispose');
-    if (_warm) return; // repeat warm-ups must be no-ops
+    if (_warm) return Future.value();
+    return _warmUpInFlight ??= _doWarmUp().whenComplete(() {
+      _warmUpInFlight = null;
+    });
+  }
+
+  Future<void> _doWarmUp() async {
+    warmUpRuns += 1;
     await Future<void>.delayed(warmUpDelay);
-    _warm = true;
+    if (!_disposed) _warm = true;
   }
 
   @override

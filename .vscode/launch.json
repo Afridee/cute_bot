@@ -1,0 +1,36 @@
+{
+    // Reads HUGGINGFACE_TOKEN from config.json via --dart-define-from-file.
+    // String.fromEnvironment only sees compile-time dart-defines, not OS env vars.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "cute_bot",
+            "request": "launch",
+            "type": "dart",
+            "program": "lib/main.dart",
+            "toolArgs": [
+                "--dart-define-from-file=config.json"
+            ]
+        },
+        {
+            "name": "cute_bot (profile mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile",
+            "program": "lib/main.dart",
+            "toolArgs": [
+                "--dart-define-from-file=config.json"
+            ]
+        },
+        {
+            "name": "cute_bot (release mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release",
+            "program": "lib/main.dart",
+            "toolArgs": [
+                "--dart-define-from-file=config.json"
+            ]
+        }
+    ]
+}

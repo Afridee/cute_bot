@@ -18,14 +18,11 @@ import 'bot_tools.dart';
 import 'context_window.dart';
 import 'gemma_init.dart';
 import 'latency_trace.dart';
+import 'model_download.dart';
 import 'pcm16.dart';
 import 'transcript.dart';
 
 const String _tag = 'GemmaBrain';
-
-/// Default E2B bundle. Latency over intelligence; E4B is a drop-in URL swap.
-const String kGemma4E2BUrl =
-    'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm';
 
 /// Context window. 2048 is the documented floor for text; audio + template
 /// + decode need headroom. LiteRT fails hard (invoke status 13) when this
@@ -45,9 +42,9 @@ const String kGemmaSystemInstruction =
 
 final class GemmaBrain implements BotBrain {
   GemmaBrain({
-    this.modelUrl = kGemma4E2BUrl,
+    String? modelUrl,
     this.onChanged,
-  });
+  }) : modelUrl = modelUrl ?? gemmaModelUrlFromEnvironment();
 
   final String modelUrl;
 
@@ -65,6 +62,11 @@ final class GemmaBrain implements BotBrain {
   /// 0–100 while the `.litertlm` is downloading; null otherwise.
   int? downloadPercent;
 
+  /// Linear ETA from percent and elapsed. Null until enough samples.
+  int? downloadRemainingSec;
+
+  Stopwatch? _downloadEta;
+
   /// Last completed turn. Warm-up stages are filled on the first turn
   /// after a load (download/load/chatCreate), then left null.
   LatencyTrace? lastLatency;
@@ -73,38 +75,58 @@ final class GemmaBrain implements BotBrain {
   int? _warmLoadMs;
   int? _warmChatMs;
 
+  Future<void>? _warmUpInFlight;
+  CancelToken? _installCancel;
+
   String get kind => 'Gemma 4 E2B';
 
   @override
-  Future<void> warmUp() async {
+  Future<void> warmUp() {
     if (_disposed) throw StateError('GemmaBrain used after dispose');
-    if (_warm) return;
+    if (_warm) return Future.value();
+    return _warmUpInFlight ??= _warmUp().whenComplete(() {
+      _warmUpInFlight = null;
+    });
+  }
 
+  Future<void> _warmUp() async {
     await ensureGemmaInitialized();
 
     final downloadWatch = Stopwatch()..start();
     Log.i(_tag, 'installing $modelUrl');
-    await FlutterGemma.installModel(
-      modelType: ModelType.gemma4,
-      fileType: ModelFileType.litertlm,
-    )
-        .fromNetwork(
-          modelUrl,
-          token: huggingFaceTokenFromEnvironment(),
-          // Already running inside our connectedDevice FGS; don't start a
-          // second one with a different type.
-          foreground: false,
-        )
-        .withProgress((percent) {
-          downloadPercent = percent;
-          onChanged?.call();
-        })
-        .install();
+    try {
+      await runExclusiveModelInstall(() async {
+        // Kill leftover WorkManager pulls of this file before enqueueing
+        // one more. Same-path leftovers share a task id and fight at 1–3%.
+        await collapseLeftoverModelDownloads();
+        if (_disposed) {
+          throw StateError('GemmaBrain used after dispose');
+        }
+        try {
+          await _installModelFile();
+        } catch (e) {
+          if (_disposed || !isRecoverableModelDownloadCancel(e)) rethrow;
+          Log.w(_tag, 'install cancelled ($e), settling and retrying once');
+          await collapseLeftoverModelDownloads();
+          await Future<void>.delayed(kCollapseSettle);
+          if (_disposed) {
+            throw StateError('GemmaBrain used after dispose');
+          }
+          await _installModelFile();
+        }
+      });
+    } catch (e) {
+      _clearDownloadProgress();
+      onChanged?.call();
+      rethrow;
+    }
     downloadWatch.stop();
-    downloadPercent = null;
+    _clearDownloadProgress();
     _warmDownloadMs = downloadWatch.elapsedMilliseconds;
     Log.i(_tag, 'model file ready in ${_warmDownloadMs}ms');
     onChanged?.call();
+
+    if (_disposed) throw StateError('GemmaBrain used after dispose');
 
     final loadWatch = Stopwatch()..start();
     _model = await _loadModel();
@@ -119,6 +141,69 @@ final class GemmaBrain implements BotBrain {
     _warm = true;
     Log.i(_tag, 'chat open in ${_warmChatMs}ms');
     onChanged?.call();
+  }
+
+  Future<void> _installModelFile() async {
+    _installCancel = CancelToken();
+    var checkingFork = false;
+    var forkHits = 0;
+    // First tick is 8s in; cancel only after two consecutive forks so a
+    // leftover temp being deleted cannot kill a healthy 0% enqueue.
+    final forkWatch = Timer.periodic(const Duration(seconds: 8), (_) {
+      if (checkingFork) return;
+      checkingFork = true;
+      () async {
+        try {
+          final n = await countLiveModelDownloadTemps();
+          if (n > 1) {
+            forkHits += 1;
+            if (forkHits >= 2 && !(_installCancel?.isCancelled ?? true)) {
+              Log.w(_tag, 'download forked ($n temps)');
+              _installCancel?.cancel('forked download');
+            }
+          } else {
+            forkHits = 0;
+          }
+        } catch (e) {
+          Log.w(_tag, 'fork check failed: $e');
+        } finally {
+          checkingFork = false;
+        }
+      }();
+    });
+    try {
+      await FlutterGemma.installModel(
+        modelType: ModelType.gemma4,
+        fileType: ModelFileType.litertlm,
+      )
+          .fromNetwork(
+            modelUrl,
+            token: downloadTokenForModelUrl(modelUrl),
+            // Already running inside our connectedDevice FGS; don't start a
+            // second one with a different type.
+            foreground: false,
+          )
+          .withProgress((percent) {
+            final held = holdDownloadPercent(downloadPercent, percent);
+            if (held <= 1) {
+              (_downloadEta ??= Stopwatch())
+                ..reset()
+                ..start();
+            } else {
+              _downloadEta ??= Stopwatch()..start();
+            }
+            downloadPercent = held;
+            downloadRemainingSec = estimateDownloadRemaining(
+              percent: held,
+              elapsed: _downloadEta!.elapsed,
+            )?.inSeconds;
+            onChanged?.call();
+          })
+          .withCancelToken(_installCancel!)
+          .install();
+    } finally {
+      forkWatch.cancel();
+    }
   }
 
   Future<InferenceModel> _loadModel() async {
@@ -319,11 +404,19 @@ final class GemmaBrain implements BotBrain {
     }
   }
 
+  void _clearDownloadProgress() {
+    downloadPercent = null;
+    downloadRemainingSec = null;
+    _downloadEta?.stop();
+    _downloadEta = null;
+  }
+
   @override
   Future<void> dispose() async {
     _disposed = true;
     _warm = false;
-    downloadPercent = null;
+    _clearDownloadProgress();
+    _installCancel?.cancel('GemmaBrain.dispose');
     try {
       await _chat?.close();
     } catch (e) {
