@@ -3,6 +3,7 @@
 
 import 'package:flutter/material.dart';
 
+import '../../design/design.dart';
 import '../brain/brain_session.dart';
 import '../brain/model_download.dart';
 import '../companion_controller.dart';
@@ -63,48 +64,70 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final nd = context.nd;
     final step = _display;
+    final trail = _trail;
+    final index = trail.indexOf(step);
+    final indexLabel = index < 0
+        ? ''
+        : '${(index + 1).toString().padLeft(2, '0')} / '
+            '${trail.length.toString().padLeft(2, '0')}';
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Set up Companion'),
-        leading: _canGoBack
-            ? IconButton(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: _goBack,
-              )
-            : null,
-      ),
-      body: ListenableBuilder(
-        listenable: _c,
-        builder: (context, _) {
-          // Facts changed (resume from settings): drop a stale viewing
-          // step that is now ahead of the first failure.
-          if (_viewing != null && _viewing!.index > _resolved.index) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) setState(() => _viewing = null);
-            });
-          }
-          return Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(
-                  child: ListView(
+      body: SafeArea(
+        child: ListenableBuilder(
+          listenable: _c,
+          builder: (context, _) {
+            // Facts changed (resume from settings): drop a stale viewing
+            // step that is now ahead of the first failure.
+            if (_viewing != null && _viewing!.index > _resolved.index) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) setState(() => _viewing = null);
+              });
+            }
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(
+                CuteBotSpace.lg,
+                CuteBotSpace.md,
+                CuteBotSpace.lg,
+                CuteBotSpace.lg,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
                     children: [
-                      Text(_title(step), style: theme.textTheme.titleLarge),
-                      const SizedBox(height: 8),
-                      Text(_body(step), style: theme.textTheme.bodyMedium),
-                      ..._extras(context, step),
+                      if (_canGoBack) ...[
+                        NdBackButton(onPressed: _goBack),
+                        const SizedBox(width: CuteBotSpace.md),
+                      ],
+                      const NdLabel('Set up'),
+                      const Spacer(),
+                      if (indexLabel.isNotEmpty)
+                        Text(indexLabel, style: nd.typography.label),
                     ],
                   ),
-                ),
-                ..._actions(context, step),
-              ],
-            ),
-          );
-        },
+                  const SizedBox(height: CuteBotSpace.xl),
+                  Expanded(
+                    child: ListView(
+                      children: [
+                        Text(_title(step), style: nd.typography.heading),
+                        const SizedBox(height: CuteBotSpace.sm),
+                        Text(
+                          _body(step),
+                          style: nd.typography.body
+                              .copyWith(color: nd.colors.textSecondary),
+                        ),
+                        ..._extras(context, step),
+                      ],
+                    ),
+                  ),
+                  ..._actions(context, step),
+                ],
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -160,10 +183,9 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
     switch (step) {
       case CompanionSetupStep.oemKeepAlive:
         return const [
-          SizedBox(height: 16),
+          SizedBox(height: CuteBotSpace.xl),
           _KeepAliveStep(
             number: 1,
-            icon: Icons.home_outlined,
             title: 'Leave with Home, not a swipe',
             body:
                 'Swiping Cute Bot away in Recents force-stops it on this phone '
@@ -172,21 +194,18 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
           ),
           _KeepAliveStep(
             number: 2,
-            icon: Icons.lock_outline,
             title: 'Lock Cute Bot in Recents',
             body: 'Pull down on the Cute Bot card in Recents (or long-press '
                 'it) and tap the lock icon.',
           ),
           _KeepAliveStep(
             number: 3,
-            icon: Icons.play_circle_outline,
             title: 'Allow autostart',
             body: 'Settings → Apps → Cute Bot → Autostart (or i Manager → '
                 'Autostart manager).',
           ),
           _KeepAliveStep(
             number: 4,
-            icon: Icons.battery_charging_full_outlined,
             title: 'Allow high background power use',
             body: 'Settings → Battery → Background power consumption → '
                 'Cute Bot → allow high.',
@@ -203,91 +222,100 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
     final reviewing = step != _resolved && step != CompanionSetupStep.done;
     if (reviewing) {
       return [
-        FilledButton(onPressed: _goForward, child: const Text('Continue')),
+        NdButton.primary(label: 'Continue', expand: true, onPressed: _goForward),
       ];
     }
 
     switch (step) {
       case CompanionSetupStep.welcome:
         return [
-          FilledButton(
-            onPressed: () async {
-              await _c.markWelcomeSeen();
-              setState(() => _viewing = null);
-            },
-            child: const Text('Continue'),
-          ),
+          NdButton.primary(
+              label: 'Continue',
+              expand: true,
+              onPressed: () async {
+                await _c.markWelcomeSeen();
+                setState(() => _viewing = null);
+              },
+            ),
         ];
       case CompanionSetupStep.notifications:
         return [
           if (_c.notificationPermanentlyDenied || !_c.notificationsGranted)
-            OutlinedButton(
+            NdButton.secondary(
+              label: 'Open app settings',
+              expand: true,
               onPressed: _c.openAppSettings,
-              child: const Text('Open app settings'),
             ),
-          const SizedBox(height: 8),
-          FilledButton(
-            onPressed: _c.notificationsGranted ? null : _c.requestNotifications,
-            child: const Text('Allow notifications'),
+          if (_c.notificationPermanentlyDenied || !_c.notificationsGranted)
+            const SizedBox(height: CuteBotSpace.sm),
+          NdButton.primary(
+            label: 'Allow notifications',
+            expand: true,
+            onPressed:
+                _c.notificationsGranted ? null : _c.requestNotifications,
           ),
         ];
       case CompanionSetupStep.bluetooth:
         final needRadio = _c.bleAuthorized && !_c.bluetoothOn;
         return [
-          FilledButton(
+          NdButton.primary(
+            label: needRadio ? 'Turn on Bluetooth' : 'Allow Bluetooth',
+            expand: true,
             onPressed: needRadio ? _c.openBluetoothSettings : _c.requestBle,
-            child: Text(
-                needRadio ? 'Turn on Bluetooth' : 'Allow Bluetooth'),
           ),
         ];
       case CompanionSetupStep.battery:
         return [
-          FilledButton(
-            onPressed:
-                _c.batteryOptimizationExempt ? null : _c.requestBatteryExemption,
-            child: const Text('Allow background'),
+          NdButton.primary(
+            label: 'Allow background',
+            expand: true,
+            onPressed: _c.batteryOptimizationExempt
+                ? null
+                : _c.requestBatteryExemption,
           ),
         ];
       case CompanionSetupStep.notificationAccess:
         return [
-          FilledButton(
+          NdButton.primary(
+            label: 'Open Notification access settings',
+            expand: true,
             onPressed: _c.notificationAccessGranted
                 ? null
                 : _c.openNotificationAccessSettings,
-            child: const Text('Open Notification access settings'),
           ),
         ];
       case CompanionSetupStep.oemKeepAlive:
         return [
-          OutlinedButton(
+          NdButton.secondary(
+            label: 'I’ll do this later',
+            expand: true,
             onPressed: _c.skipOemKeepAlive,
-            child: const Text('I’ll do this later'),
           ),
-          const SizedBox(height: 8),
-          FilledButton(
+          const SizedBox(height: CuteBotSpace.sm),
+          NdButton.primary(
+            label: 'I did this',
+            expand: true,
             onPressed: _c.acknowledgeOemKeepAlive,
-            child: const Text('I did this'),
           ),
         ];
       case CompanionSetupStep.cdmLink:
         final link = _c.companionLink;
         return [
-          OutlinedButton(
+          NdButton.secondary(
+            label: 'I’ll do this later',
+            expand: true,
             onPressed: _c.skipCdm,
-            child: const Text('I’ll do this later'),
           ),
-          const SizedBox(height: 8),
-          FilledButton(
+          const SizedBox(height: CuteBotSpace.sm),
+          NdButton.primary(
+            label: link.associating ? 'Choosing…' : 'Link bot to Android',
+            expand: true,
             onPressed: link.associating ? null : link.associate,
-            child: Text(link.associating ? 'Choosing…' : 'Link bot to Android'),
           ),
           if (link.lastError != null)
             Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                link.lastError!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
+              padding: const EdgeInsets.only(top: CuteBotSpace.sm),
+              child: NdStatusText.error(link.lastError!),
             ),
         ];
       case CompanionSetupStep.brain:
@@ -304,7 +332,7 @@ class _BrainProgress extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final nd = context.nd;
     final s = controller.snapshot;
     final percent = s?.downloadPercent;
     final error = s?.brainError;
@@ -312,37 +340,48 @@ class _BrainProgress extends StatelessWidget {
     final ready = s != null && companionBrainIsReady(s.brainState);
 
     return Padding(
-      padding: const EdgeInsets.only(top: 24),
+      padding: const EdgeInsets.only(top: CuteBotSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (ready)
-            Row(
-              children: [
-                const Icon(Icons.check_circle, color: Colors.green),
-                const SizedBox(width: 8),
-                Text('Ready', style: theme.textTheme.titleMedium),
-              ],
-            )
-          else if (error != null) ...[
-            Text(error, style: TextStyle(color: theme.colorScheme.error)),
-            const SizedBox(height: 8),
-            FilledButton(
+          if (ready) ...[
+            Text('READY', style: nd.typography.displayMd),
+            const SizedBox(height: CuteBotSpace.sm),
+            const NdStatusText.ready(),
+          ] else if (error != null) ...[
+            NdStatusText.error(error),
+            const SizedBox(height: CuteBotSpace.md),
+            NdButton.primary(
+              label: 'Retry',
+              expand: true,
               onPressed: controller.retryBrain,
-              child: const Text('Retry'),
             ),
           ] else if (percent != null) ...[
-            Text(downloadProgressLabel(percent, s?.downloadRemainingSec)),
-            const SizedBox(height: 8),
-            LinearProgressIndicator(value: percent / 100),
-          ] else if (warming) ...[
-            const Text('Loading…'),
-            const SizedBox(height: 8),
-            const LinearProgressIndicator(),
+            Text(
+              '$percent%',
+              style: nd.typography.displayMd,
+            ),
+            const SizedBox(height: CuteBotSpace.sm),
+            Text(
+              downloadProgressLabel(percent, s?.downloadRemainingSec),
+              style: nd.typography.body.copyWith(color: nd.colors.textSecondary),
+            ),
+            const SizedBox(height: CuteBotSpace.md),
+            NdSegmentedProgress(value: percent / 100, height: 16),
           ] else ...[
-            const Text('Waiting for the service to start the download…'),
-            const SizedBox(height: 8),
-            const LinearProgressIndicator(),
+            const NdStatusText.loading(),
+            const SizedBox(height: CuteBotSpace.md),
+            NdSegmentedProgress(
+              value: warming ? 0.15 : 0,
+              height: 16,
+            ),
+            if (!warming) ...[
+              const SizedBox(height: CuteBotSpace.sm),
+              Text(
+                'Waiting for the service to start the download…',
+                style: nd.typography.body.copyWith(color: nd.colors.textDisabled),
+              ),
+            ],
           ],
         ],
       ),
@@ -353,47 +392,44 @@ class _BrainProgress extends StatelessWidget {
 class _KeepAliveStep extends StatelessWidget {
   const _KeepAliveStep({
     required this.number,
-    required this.icon,
     required this.title,
     required this.body,
   });
 
   final int number;
-  final IconData icon;
   final String title;
   final String body;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            CircleAvatar(radius: 14, child: Text('$number')),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(icon, size: 18),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(title, style: theme.textTheme.titleSmall),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(body, style: theme.textTheme.bodySmall),
-                ],
-              ),
+    final nd = context.nd;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: CuteBotSpace.lg),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 28,
+            child: Text(
+              number.toString().padLeft(2, '0'),
+              style: nd.typography.label,
             ),
-          ],
-        ),
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: nd.typography.body),
+                const SizedBox(height: CuteBotSpace.xs),
+                Text(
+                  body,
+                  style: nd.typography.bodySm
+                      .copyWith(color: nd.colors.textSecondary),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

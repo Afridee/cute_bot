@@ -11,6 +11,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'bot_simulator/simulator_page.dart';
 import 'companion/companion_page.dart';
+import 'design/design.dart';
 
 void main() {
   // Receive port for foreground-service -> UI messages (M2). Must be set up
@@ -19,52 +20,88 @@ void main() {
   runApp(const CuteBotApp());
 }
 
-class CuteBotApp extends StatelessWidget {
+class CuteBotApp extends StatefulWidget {
   const CuteBotApp({super.key});
+
+  @override
+  State<CuteBotApp> createState() => _CuteBotAppState();
+}
+
+class _CuteBotAppState extends State<CuteBotApp> {
+  ThemeMode _themeMode = ThemeMode.dark;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Cute Bot',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.pink),
+      theme: CuteBotTheme.light,
+      darkTheme: CuteBotTheme.dark,
+      themeMode: _themeMode,
+      home: ModeSelectPage(
+        themeMode: _themeMode,
+        onThemeModeChanged: (mode) => setState(() => _themeMode = mode),
       ),
-      home: const ModeSelectPage(),
     );
   }
 }
 
 class ModeSelectPage extends StatelessWidget {
-  const ModeSelectPage({super.key});
+  const ModeSelectPage({
+    super.key,
+    required this.themeMode,
+    required this.onThemeModeChanged,
+  });
+
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
 
   @override
   Widget build(BuildContext context) {
+    final nd = context.nd;
     return Scaffold(
-      appBar: AppBar(title: const Text('Cute Bot')),
-      body: Center(
+      body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.fromLTRB(
+            CuteBotSpace.lg,
+            CuteBotSpace.xl,
+            CuteBotSpace.lg,
+            CuteBotSpace.lg,
+          ),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _ModeButton(
-                icon: Icons.smart_toy,
-                title: 'Bot Simulator',
-                subtitle: 'This phone pretends to be the robot (peripheral)',
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const SimulatorPage()),
-                ),
-              ),
-              const SizedBox(height: 16),
-              _ModeButton(
-                icon: Icons.phone_android,
+              Text('CUTE BOT', style: nd.typography.displayLg),
+              const SizedBox(height: CuteBotSpace.xxxxl),
+              _ModeRow(
                 title: 'Companion',
                 subtitle: 'The brain: connects to the bot (central)',
                 onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const CompanionPage()),
+                  MaterialPageRoute<void>(
+                    builder: (_) => const CompanionPage(),
+                  ),
                 ),
               ),
+              const SizedBox(height: CuteBotSpace.xl),
+              _ModeRow(
+                title: 'Bot Simulator',
+                subtitle: 'This phone pretends to be the robot (peripheral)',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const SimulatorPage(),
+                  ),
+                ),
+              ),
+              const Spacer(),
+              NdSegmentedControl<ThemeMode>(
+                value: themeMode,
+                onChanged: onThemeModeChanged,
+                segments: const [
+                  (ThemeMode.dark, 'Dark'),
+                  (ThemeMode.light, 'Light'),
+                ],
+              ),
+              const SizedBox(height: CuteBotSpace.md),
+              Text('PHONE BRAIN  ·  BLE EARS', style: nd.typography.label),
             ],
           ),
         ),
@@ -73,46 +110,33 @@ class ModeSelectPage extends StatelessWidget {
   }
 }
 
-class _ModeButton extends StatelessWidget {
-  const _ModeButton({
-    required this.icon,
+class _ModeRow extends StatelessWidget {
+  const _ModeRow({
     required this.title,
     required this.subtitle,
     required this.onTap,
   });
 
-  final IconData icon;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Row(
-            children: [
-              Icon(icon, size: 40),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title,
-                        style: Theme.of(context).textTheme.titleLarge),
-                    Text(subtitle,
-                        style: Theme.of(context).textTheme.bodyMedium),
-                  ],
-                ),
-              ),
-              const Icon(Icons.chevron_right),
-            ],
+    final nd = context.nd;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title.toUpperCase(), style: nd.typography.heading),
+          const SizedBox(height: CuteBotSpace.xs),
+          Text(
+            subtitle,
+            style: nd.typography.body.copyWith(color: nd.colors.textSecondary),
           ),
-        ),
+        ],
       ),
     );
   }
