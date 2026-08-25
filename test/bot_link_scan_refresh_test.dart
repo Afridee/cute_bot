@@ -50,4 +50,109 @@ void main() {
     expect(shouldAdoptScanningState(BotLinkState.configuring), isFalse);
     expect(shouldAdoptScanningState(BotLinkState.ready), isFalse);
   });
+
+  group('notify liveness', () {
+    test('does nothing unless the link is ready', () {
+      expect(
+        notifyLivenessAction(
+          state: BotLinkState.connecting,
+          now: now,
+          lastInboundAt: null,
+          probeSentAt: null,
+        ),
+        NotifyLivenessAction.none,
+      );
+    });
+
+    test('waits out the grace period after becoming ready', () {
+      expect(
+        notifyLivenessAction(
+          state: BotLinkState.ready,
+          now: now,
+          lastInboundAt: null,
+          probeSentAt: null,
+          readySince: now,
+        ),
+        NotifyLivenessAction.none,
+      );
+    });
+
+    test('probes once when ready with no inbound', () {
+      expect(
+        notifyLivenessAction(
+          state: BotLinkState.ready,
+          now: now,
+          lastInboundAt: null,
+          probeSentAt: null,
+          readySince: now.subtract(kNotifyProbeGrace),
+        ),
+        NotifyLivenessAction.probe,
+      );
+    });
+
+    test('does not probe again after inbound arrives', () {
+      expect(
+        notifyLivenessAction(
+          state: BotLinkState.ready,
+          now: now,
+          lastInboundAt: now.subtract(const Duration(minutes: 5)),
+          probeSentAt: null,
+          readySince: now.subtract(const Duration(minutes: 5)),
+        ),
+        NotifyLivenessAction.none,
+      );
+    });
+
+    test('reconnects if the probe stays silent', () {
+      expect(
+        notifyLivenessAction(
+          state: BotLinkState.ready,
+          now: now,
+          lastInboundAt: null,
+          probeSentAt: now.subtract(kNotifyProbeTimeout),
+          readySince: now.subtract(kNotifyProbeGrace),
+        ),
+        NotifyLivenessAction.reconnect,
+      );
+    });
+
+    test('waits out the probe window before reconnecting', () {
+      expect(
+        notifyLivenessAction(
+          state: BotLinkState.ready,
+          now: now,
+          lastInboundAt: null,
+          probeSentAt: now.subtract(const Duration(milliseconds: 500)),
+          readySince: now.subtract(kNotifyProbeGrace),
+        ),
+        NotifyLivenessAction.none,
+      );
+    });
+  });
+
+  group('scan dwell winner', () {
+    test('returns null when there are no candidates', () {
+      expect(pickScanWinner({}), isNull);
+    });
+
+    test('prefers a live RSSI over a cached ghost', () {
+      expect(
+        pickScanWinner({
+          'ghost': -84,
+          'live': -41,
+        }),
+        'live',
+      );
+    });
+
+    test('falls back to the loudest ghost if nothing is live', () {
+      expect(
+        pickScanWinner({
+          'far': -92,
+          'cached': -84,
+        }),
+        'cached',
+      );
+    });
+  });
 }

@@ -179,24 +179,7 @@ final class SimulatorController extends ChangeNotifier {
           '${_shortId(e.central)} ${connected ? 'connected' : 'disconnected'}');
       final id = e.central.uuid.toString();
       if (connected) {
-        _connectedCentrals[id] = e.central;
-        // Phone-to-phone: the companion's CCCD write often never ACKs on
-        // OEM Android stacks, so characteristicNotifyStateChanged never
-        // fires. Treat a connected central as subscribed; nRF Connect
-        // still toggles via _onNotifyState when CCCD does arrive.
-        _audioSubscribers[id] = e.central;
-        _telemetrySubscribers[id] = e.central;
-        // A late advertise retry must not start while a central is attached.
-        _expectingCompanion = false;
-        _cancelAdvertiseWatchdog(bumpEpoch: true);
-        _advertiseFailures = 0;
-        // Android stops connectable advertising when a central attaches.
-        // Keep the chip honest; we restart ads when the last one leaves.
-        if (advertising) {
-          advertising = false;
-          _logActivity('Advertising stopped (companion connected)');
-          Log.i(_tag, 'advertising stopped (central connected)');
-        }
+        _rememberCentral(e.central, reason: 'connected');
       } else {
         _connectedCentrals.remove(id);
         _audioSubscribers.remove(id);
@@ -532,6 +515,31 @@ final class SimulatorController extends ChangeNotifier {
 
   // --- inbound GATT events ---
 
+  /// Connection-state and CCCD callbacks both flake on OEM stacks. A write
+  /// arriving is proof the central is here — keep subscriber maps in sync
+  /// so hold-to-talk is not stuck on "Waiting for an audio subscriber".
+  void _rememberCentral(Central central, {required String reason}) {
+    final id = central.uuid.toString();
+    final wasKnown = _connectedCentrals.containsKey(id) &&
+        _audioSubscribers.containsKey(id) &&
+        _telemetrySubscribers.containsKey(id);
+    _connectedCentrals[id] = central;
+    _audioSubscribers[id] = central;
+    _telemetrySubscribers[id] = central;
+    if (!wasKnown) {
+      _logActivity('${_shortId(central)} attached ($reason)');
+      Log.i(_tag, '${_shortId(central)} attached via $reason');
+      _expectingCompanion = false;
+      _cancelAdvertiseWatchdog(bumpEpoch: true);
+      _advertiseFailures = 0;
+      if (advertising) {
+        advertising = false;
+        _logActivity('Advertising stopped (companion attached)');
+      }
+      notifyListeners();
+    }
+  }
+
   void _onNotifyState(GATTCharacteristicNotifyStateChangedEventArgs args) {
     final id = args.central.uuid.toString();
     final Map<String, Central>? registry;
@@ -600,6 +608,8 @@ final class SimulatorController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+
+    _rememberCentral(args.central, reason: 'wrote');
 
     if (args.characteristic.uuid == _audioToBotChar.uuid &&
         message is AudioChunkMessage) {

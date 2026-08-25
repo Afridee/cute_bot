@@ -110,6 +110,65 @@ bool shouldRefreshStaleScan({
   return now.difference(scanningSince) >= staleAfter;
 }
 
+/// After a peripheral Bluetooth toggle, Android may keep the central's
+/// GATT client "connected" without firing disconnect — writes still work,
+/// but CCCD is stale so audio/telemetry notifies never arrive. One
+/// get_battery after the link comes up: if that notify never arrives,
+/// reconnect. Do not probe on a timer — a ghost/cached GATT can answer
+/// battery forever and pin us off the live advertiser.
+const Duration kNotifyProbeGrace = Duration(seconds: 2);
+const Duration kNotifyProbeTimeout = Duration(seconds: 2);
+
+enum NotifyLivenessAction { none, probe, reconnect }
+
+/// [readySince] is when this session became ready. [lastInboundAt] null
+/// means nothing received yet this session.
+@visibleForTesting
+NotifyLivenessAction notifyLivenessAction({
+  required BotLinkState state,
+  required DateTime now,
+  DateTime? lastInboundAt,
+  DateTime? probeSentAt,
+  DateTime? readySince,
+  Duration probeGrace = kNotifyProbeGrace,
+  Duration probeTimeout = kNotifyProbeTimeout,
+}) {
+  if (state != BotLinkState.ready) return NotifyLivenessAction.none;
+  // Heard the bot this session — CCCD is live. Stop probing.
+  if (lastInboundAt != null) return NotifyLivenessAction.none;
+  if (readySince != null && now.difference(readySince) < probeGrace) {
+    return NotifyLivenessAction.none;
+  }
+  if (probeSentAt == null) return NotifyLivenessAction.probe;
+  if (now.difference(probeSentAt) >= probeTimeout) {
+    return NotifyLivenessAction.reconnect;
+  }
+  return NotifyLivenessAction.none;
+}
+
+/// Android often delivers a *cached* advertisement (stale random address,
+/// stale RSSI) in the first milliseconds of a scan. Dwell, then connect
+/// to the loudest result so we don't latch onto a ghost from a previous
+/// bond / address rotation.
+const Duration kScanDwell = Duration(milliseconds: 800);
+
+/// Prefer live advertisers over cached ghosts (~-84 dBm in the field).
+const int kStaleAdvertisementRssi = -80;
+
+/// Pick the peripheral id to connect to after [kScanDwell]. Prefers the
+/// strongest RSSI at or above [kStaleAdvertisementRssi]; if every result
+/// is weaker, still take the loudest so a distant bot can connect.
+@visibleForTesting
+String? pickScanWinner(
+  Map<String, int> rssiById, {
+  int staleRssi = kStaleAdvertisementRssi,
+}) {
+  if (rssiById.isEmpty) return null;
+  final live = rssiById.entries.where((e) => e.value >= staleRssi);
+  final pool = live.isNotEmpty ? live : rssiById.entries;
+  return pool.reduce((a, b) => a.value >= b.value ? a : b).key;
+}
+
 /// startDiscovery's Future completes when the scanner starts, but an
 /// advertisement can already have been delivered. Do not take (or fail)
 /// the scanning state if a connect is already in flight.
@@ -185,7 +244,10 @@ final class BotLink extends ChangeNotifier {
 
   Timer? _reconnectTimer;
   Timer? _connectTimeout;
+  Timer? _scanDwellTimer;
   DateTime? _scanningSince;
+  final Map<String, Peripheral> _scanPeripherals = {};
+  final Map<String, int> _scanRssi = {};
   bool _started = false;
   bool _stopping = false;
 
@@ -341,6 +403,10 @@ final class BotLink extends ChangeNotifier {
 
   Future<void> _startScan() async {
     if (_stopping) return;
+    _scanDwellTimer?.cancel();
+    _scanDwellTimer = null;
+    _scanPeripherals.clear();
+    _scanRssi.clear();
     try {
       await _central.startDiscovery(
         serviceUUIDs: [UUID.fromString(BotUuids.service)],
@@ -363,17 +429,36 @@ final class BotLink extends ChangeNotifier {
 
   Future<void> _onDiscovered(DiscoveredEventArgs args) async {
     if (state != BotLinkState.scanning) return;
-    state = BotLinkState.connecting;
-    _peripheral = args.peripheral;
-    rssi = args.rssi;
-    botId = _shortId(args.peripheral.uuid.toString());
+    final id = args.peripheral.uuid.toString();
+    _scanPeripherals[id] = args.peripheral;
+    final prev = _scanRssi[id];
+    if (prev == null || args.rssi > prev) _scanRssi[id] = args.rssi;
     Log.i(_tag,
-        'found bot $botId (rssi ${args.rssi}, name ${args.advertisement.name})');
+        'saw bot ${_shortId(id)} (rssi ${args.rssi}, name ${args.advertisement.name})');
+    _scanDwellTimer ??= Timer(kScanDwell, _connectBestDiscovery);
+  }
+
+  Future<void> _connectBestDiscovery() async {
+    _scanDwellTimer = null;
+    if (_stopping || state != BotLinkState.scanning) return;
+    final winnerId = pickScanWinner(_scanRssi);
+    final peripheral = winnerId == null ? null : _scanPeripherals[winnerId];
+    if (peripheral == null || winnerId == null) {
+      Log.w(_tag, 'scan dwell ended with no candidate');
+      return;
+    }
+    final winnerRssi = _scanRssi[winnerId];
+    state = BotLinkState.connecting;
+    _peripheral = peripheral;
+    rssi = winnerRssi;
+    botId = _shortId(winnerId);
+    Log.i(_tag,
+        'found bot $botId (rssi $winnerRssi, ${_scanRssi.length} candidates)');
     notifyListeners();
 
     _establishing = true;
     try {
-      await _connectWithRetries(args.peripheral);
+      await _connectWithRetries(peripheral);
     } finally {
       _establishing = false;
     }
@@ -446,6 +531,10 @@ final class BotLink extends ChangeNotifier {
     if (args.state == ConnectionState.connected) {
       _connectTimeout?.cancel();
       if (state == BotLinkState.configuring || state == BotLinkState.ready) {
+        // Duplicate connected on a live session is normal. The same event
+        // after a peripheral Bluetooth toggle (no disconnect seen) is how
+        // CCCD goes stale — BotService's notify-liveness probe recovers.
+        Log.w(_tag, 'connected while already ${state.name}');
         return;
       }
       try {
@@ -566,6 +655,28 @@ final class BotLink extends ChangeNotifier {
     }
   }
 
+  /// Tear the GATT client down and scan again. Used when writes still
+  /// succeed but notifications have gone silent (stale CCCD after the
+  /// peripheral restarted without a disconnect callback).
+  Future<void> forceReconnect({required String reason}) async {
+    if (_stopping) return;
+    if (state != BotLinkState.ready && state != BotLinkState.configuring) {
+      return;
+    }
+    Log.w(_tag, 'forcing reconnect ($reason)');
+    final peripheral = _peripheral;
+    reconnectAttempt = 0;
+    _dropSession();
+    if (peripheral != null) {
+      try {
+        await _central.disconnect(peripheral);
+      } catch (e) {
+        Log.w(_tag, 'force reconnect disconnect: ${bleLogDetail(e)}');
+      }
+    }
+    _scheduleReconnect();
+  }
+
   void _scheduleReconnect() {
     if (_stopping || radioState != BluetoothLowEnergyState.poweredOn) return;
     // A failed connect completes the connect Future *and* emits a
@@ -596,6 +707,10 @@ final class BotLink extends ChangeNotifier {
   /// Clears connection-scoped state and fails anything still queued.
   void _dropSession() {
     _connectTimeout?.cancel();
+    _scanDwellTimer?.cancel();
+    _scanDwellTimer = null;
+    _scanPeripherals.clear();
+    _scanRssi.clear();
     _peripheral = null;
     _audioFromBotChar = null;
     _audioToBotChar = null;
@@ -624,6 +739,8 @@ final class BotLink extends ChangeNotifier {
     _reconnectTimer = null;
     _connectTimeout?.cancel();
     _connectTimeout = null;
+    _scanDwellTimer?.cancel();
+    _scanDwellTimer = null;
     nextReconnectAt = null;
   }
 

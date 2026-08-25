@@ -60,6 +60,10 @@ final class BotTaskHandler extends TaskHandler {
   DateTime? _utteranceFirstArrival;
   DateTime? _utteranceLastArrival;
   Timer? _utteranceIdle;
+  DateTime? _lastInboundAt;
+  DateTime? _notifyProbeSentAt;
+  DateTime? _notifyReadyAt;
+  bool _notifyLinkReady = false;
   Int16List? _lastUtterancePcm;
   ReceiveStatsSnapshot? _lastReceive;
   EchoStatsSnapshot? _lastEcho;
@@ -190,6 +194,7 @@ final class BotTaskHandler extends TaskHandler {
     // and a human tailing logcat sees the service is alive. Also cycle a
     // scan that came up after process resurrection but never hears the bot.
     _link?.onHeartbeat();
+    _checkNotifyLiveness();
     _pushSnapshot(force: true);
   }
 
@@ -284,6 +289,7 @@ final class BotTaskHandler extends TaskHandler {
 
   void _onAudioFrame(AudioChunkMessage message) {
     final now = DateTime.now();
+    _markInbound(now);
     final started = message.isUtteranceStart || !_receivingUtterance;
     if (started) {
       _utteranceFirstArrival = now;
@@ -348,6 +354,7 @@ final class BotTaskHandler extends TaskHandler {
   // --- telemetry ---
 
   void _onTelemetry(BotMessage message) {
+    _markInbound(DateTime.now());
     switch (message) {
       case BatteryStatusMessage(:final percent, :final millivolts):
         _batteryPercent = percent;
@@ -581,15 +588,63 @@ final class BotTaskHandler extends TaskHandler {
     final link = _link;
     if (link == null) return;
     if (link.state == BotLinkState.ready) {
+      if (!_notifyLinkReady) {
+        _notifyLinkReady = true;
+        _lastInboundAt = null;
+        _notifyProbeSentAt = null;
+        _notifyReadyAt = DateTime.now();
+      }
       // (Re)connected: the bot may have missed state changes — re-express.
       final session = _session;
       if (session != null) {
         _expressBrainState(session.state,
             hadError: session.lastError != null);
       }
+    } else {
+      _notifyLinkReady = false;
+      _notifyProbeSentAt = null;
+      _notifyReadyAt = null;
     }
     _updateNotification();
     _pushSnapshot();
+  }
+
+  void _markInbound(DateTime at) {
+    _lastInboundAt = at;
+    _notifyProbeSentAt = null;
+  }
+
+  /// Writes still work with a stale CCCD (LED, notification chirps). A
+  /// get_battery that is never answered with telemetry means notifies are
+  /// dead — drop the GATT client and reconnect so CCCD is rewritten.
+  void _checkNotifyLiveness() {
+    final link = _link;
+    if (link == null) return;
+    final now = DateTime.now();
+    final action = notifyLivenessAction(
+      state: link.state,
+      now: now,
+      lastInboundAt: _lastInboundAt,
+      probeSentAt: _notifyProbeSentAt,
+      readySince: _notifyReadyAt,
+    );
+    switch (action) {
+      case NotifyLivenessAction.none:
+        break;
+      case NotifyLivenessAction.probe:
+        Log.i(_tag, 'notify liveness probe (get_battery)');
+        _notifyProbeSentAt = now;
+        _sendControl(
+          GetBatteryCommand(sequence: _controlSeq.next()),
+          'notify probe',
+          quiet: true,
+        );
+      case NotifyLivenessAction.reconnect:
+        Log.w(_tag, 'no telemetry after notify probe; forcing reconnect');
+        _notifyProbeSentAt = null;
+        _lastInboundAt = null;
+        unawaited(link.forceReconnect(reason: 'notify liveness'));
+    }
   }
 
   void _sendControl(ControlMessage message, String label,
