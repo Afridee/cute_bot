@@ -212,7 +212,8 @@ on this stack. Treat the following as known-good patterns, not guesses:
   Conversely, close/recreate cycles per request can trip LiteRT on some devices. The stable
   pattern: one long-lived chat, reset between exchanges with `clearHistory()`, and an explicit
   async lock so any second consumer (in our case: the tool-execution path) is serialized rather
-  than racing the chat.
+  than racing the chat. Do not accumulate `Message.withAudio` across turns — `GemmaBrain.respond`
+  must `clearHistory()` then seed a short bot-text tail before each WAV.
 - **Size the context window generously.** LiteRT does not degrade gracefully when `maxTokens` is
   too small for template + input — inference *fails* (invoke status 13). 2048 was a working floor
   for text; budget with ~4 chars/token and reserve headroom (several hundred tokens) for the chat

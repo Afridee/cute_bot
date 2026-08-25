@@ -23,6 +23,12 @@ migrate_working_dir/
 # is commented out by default.
 #.vscode/
 
+# Local dart-defines (Hugging Face token, etc.)
+/config.json
+
+# Wrangler / miniflare local state (R2 cache, account id)
+.wrangler/
+
 # Flutter/Dart/Pub related
 **/doc/api/
 **/ios/Flutter/.last_build_id

@@ -31,6 +31,7 @@ tools-as-the-bot's-body (full `BotActuator` + timer persistence).
 | `lib/companion/companion_device_link.dart` | M2.5: Dart wrapper over the CDM MethodChannel — associate / disassociate / state for the "Android link" card. |
 | `lib/companion/oem_care.dart` | M2.5: Dart face of OEM diagnostics — manufacturer/brand, sticky "service died behind our back" marker, Notification-access grant. |
 | `lib/companion/oem_guidance_page.dart` | M2.5: one-shot "Keep the bot alive" page for vivo/iQOO (Notification access first, then Recents lock / autostart / background power). Auto-shown after an unexpected death; always reachable via **Keep-alive tips**. |
+| `lib/companion/setup/` | First-run Companion setup in front of the debug panel. Order, copy, and block/skip rules: `Docs/companion-setup.md`. |
 | `android/app/src/main/kotlin/com/cutebot/cute_bot/` | M2.5 native layer. Restart funnel: `BotServiceStarter` (the one shared restart path). Wake sources: `BotPresenceService` (CDM, API 31+), `CuteBotNotificationListenerService` (isolated `:listener` process), `KeepAliveReceiver` (~60 s AlarmManager), `ServiceWatchdog` (15-min WorkManager). Cross-process: `CuteBotProcesses`, `DefaultProcessRelay`. Bind heal: `ListenerBindPoke`. OEM: `OemCareHandler`, `CuteBotApplication`. CDM chooser: `CompanionLinkHandler`. |
 
 ## Toolchain
@@ -161,7 +162,9 @@ litert-community bundle) once at warm-up via `flutter_gemma` +
 `LiteRtLmEngine`, then holds one `createChat` session for the process
 lifetime. Utterances arrive as 16 kHz PCM-16, get wrapped as a PCM WAV (LiteRT-LM's
 miniaudio decoder needs a container, not raw samples), and go in as
-`Message.withAudio` — no STT stage. Function calls come back as
+`Message.withAudio` — no STT stage. Each turn clears chat history and
+re-seeds a short text tail of recent bot replies; old audio clips are
+not kept in the 4096-token window. Function calls come back as
 structured `FunctionCallResponse` (Gemma 4 native `<|tool_call>` tokens,
 `ModelType.gemma4`); they surface as `ToolCall` events and a stub result
 is fed back so the model can finish the spoken turn. Full `BotActuator`

@@ -22,6 +22,33 @@ String? huggingFaceTokenFromEnvironment() {
   return token.isEmpty ? null : token;
 }
 
+/// Hub default. Override with `--dart-define=GEMMA_MODEL_URL=…` (or
+/// `config.json`) once the `.litertlm` is on a CDN / R2 bucket.
+const String kGemma4E2BHubUrl =
+    'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm';
+
+/// Resolved install URL. Empty `GEMMA_MODEL_URL` keeps the Hub fallback.
+String gemmaModelUrlFromEnvironment() {
+  const override = String.fromEnvironment('GEMMA_MODEL_URL');
+  return resolveGemmaModelUrl(override);
+}
+
+String resolveGemmaModelUrl(String override) {
+  final url = override.trim();
+  return url.isEmpty ? kGemma4E2BHubUrl : url;
+}
+
+/// `fromNetwork` should only send a Bearer token to Hugging Face. A token
+/// on R2 / S3 / a custom CDN makes the GET fail.
+String? downloadTokenForModelUrl(String url) {
+  return isHuggingFaceModelUrl(url) ? huggingFaceTokenFromEnvironment() : null;
+}
+
+bool isHuggingFaceModelUrl(String url) {
+  final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+  return host == 'huggingface.co' || host.endsWith('.huggingface.co');
+}
+
 /// Registers the LiteRT-LM engine. Safe to call more than once.
 Future<void> ensureGemmaInitialized() {
   return _inFlight ??= _initialize();

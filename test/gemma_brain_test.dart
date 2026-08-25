@@ -4,8 +4,10 @@
 import 'dart:typed_data';
 
 import 'package:cute_bot/companion/brain/bot_tools.dart';
+import 'package:cute_bot/companion/brain/context_window.dart';
 import 'package:cute_bot/companion/brain/latency_trace.dart';
 import 'package:cute_bot/companion/brain/pcm16.dart';
+import 'package:cute_bot/companion/brain/transcript.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -96,6 +98,98 @@ void main() {
     test('known tools return status, unknown tools error', () {
       expect(stubToolResult('wiggle', const {}), containsPair('status', 'ok'));
       expect(stubToolResult('nope', const {})['error'], contains('unknown'));
+    });
+  });
+
+  group('rollingTextWindow', () {
+    TranscriptEntry voice([String secs = '1.2']) => TranscriptEntry(
+          role: TranscriptRole.user,
+          text: '(voice, $secs s)',
+        );
+    TranscriptEntry bot(String text) =>
+        TranscriptEntry(role: TranscriptRole.bot, text: text);
+    TranscriptEntry system(String text) =>
+        TranscriptEntry(role: TranscriptRole.system, text: text);
+    TranscriptEntry userText(String text) =>
+        TranscriptEntry(role: TranscriptRole.user, text: text);
+
+    test('empty transcript yields an empty seed', () {
+      expect(rollingTextWindow(const []), isEmpty);
+    });
+
+    test('drops the trailing (voice, X s) user placeholder', () {
+      final seed = rollingTextWindow([bot('Hi!'), voice()]);
+      expect(seed, hasLength(1));
+      expect(seed.single.text, 'Hi!');
+      expect(seed.single.role, TranscriptRole.bot);
+    });
+
+    test('drops every user voice placeholder and keeps bot text', () {
+      final seed = rollingTextWindow([
+        voice('0.4'),
+        bot('Hello'),
+        voice('0.8'),
+        bot('Again'),
+        voice('1.1'),
+      ]);
+      expect(seed.map((e) => e.text).toList(), ['Hello', 'Again']);
+    });
+
+    test('keeps system lines among seedable text', () {
+      final seed = rollingTextWindow([
+        system('booted'),
+        voice(),
+        bot('ready'),
+      ]);
+      expect(seed.map((e) => e.text).toList(), ['booted', 'ready']);
+    });
+
+    test('does not seed non-voice user text either', () {
+      final seed = rollingTextWindow([
+        userText('typed in the UI'),
+        bot('ok'),
+      ]);
+      expect(seed.map((e) => e.text).toList(), ['ok']);
+    });
+
+    test('caps at 16 seedable bot lines, oldest dropped', () {
+      final bots = [for (var i = 0; i < 17; i++) bot('b$i')];
+      final seed = rollingTextWindow(bots);
+      expect(seed, hasLength(kContextEntryCap));
+      expect(seed.first.text, 'b1');
+      expect(seed.last.text, 'b16');
+    });
+
+    test('does not reorder seedable lines', () {
+      final seed = rollingTextWindow([
+        bot('one'),
+        voice(),
+        bot('two'),
+        bot('three'),
+      ]);
+      expect(seed.map((e) => e.text).toList(), ['one', 'two', 'three']);
+    });
+
+    test('mixed 30-line transcript yields the last 16 bot lines', () {
+      final transcript = <TranscriptEntry>[];
+      for (var i = 0; i < 10; i++) {
+        transcript.add(voice('$i.0'));
+        transcript.add(bot('b$i'));
+      }
+      for (var i = 10; i < 20; i++) {
+        transcript.add(bot('b$i'));
+      }
+      expect(transcript, hasLength(30));
+      final seed = rollingTextWindow(transcript);
+      expect(seed, hasLength(kContextEntryCap));
+      expect(seed.every((e) => e.role == TranscriptRole.bot), isTrue);
+      expect(seed.map((e) => e.text).toList(),
+          [for (var i = 4; i < 20; i++) 'b$i']);
+    });
+
+    test('fewer than 16 bot lines is not padded', () {
+      final seed = rollingTextWindow([voice(), bot('only')]);
+      expect(seed.map((e) => e.text).toList(), ['only']);
     });
   });
 }

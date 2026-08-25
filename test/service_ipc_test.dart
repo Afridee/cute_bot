@@ -23,6 +23,7 @@ void main() {
         SimulateUtteranceUiCommand(millis: 900),
         ClearTranscriptUiCommand(),
         RequestSnapshotUiCommand(),
+        RetryBrainUiCommand(),
         SetPhoneAlertsUiCommand(false),
         PhoneAlertUiCommand(packageName: 'com.whatsapp', category: 'msg'),
       ];
@@ -102,6 +103,7 @@ void main() {
           brainError: null,
           brainKind: 'Gemma 4 E2B',
           downloadPercent: 42,
+          downloadRemainingSec: 600,
           lastLatency: const LatencyTrace(
             submitMs: 80,
             firstTokenMs: 900,
@@ -150,6 +152,7 @@ void main() {
         expect(s.brainState, BrainSessionState.responding);
         expect(s.brainKind, 'Gemma 4 E2B');
         expect(s.downloadPercent, 42);
+        expect(s.downloadRemainingSec, 600);
         expect(s.lastLatency!.firstTokenMs, 900);
         expect(s.lastLatency!.backend, 'gpu');
         expect(s.replayedEntries, 4);
@@ -181,6 +184,7 @@ void main() {
       expect(minimal.brainState, BrainSessionState.cold);
       expect(minimal.brainKind, 'unknown');
       expect(minimal.downloadPercent, isNull);
+      expect(minimal.downloadRemainingSec, isNull);
       expect(minimal.lastLatency, isNull);
       expect(minimal.mtu, 23);
       expect(minimal.lastReceive, isNull);

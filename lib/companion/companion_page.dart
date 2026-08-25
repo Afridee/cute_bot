@@ -1,16 +1,20 @@
-// Companion debug panel — M2 shape. Everything shown here is rendered from
-// the latest ServiceSnapshot pushed by the foreground service; the page
-// holds no bot state of its own. Plain and functional; pretty comes later.
+// Companion instrument panel — M2 shape. Everything shown here is rendered
+// from the latest ServiceSnapshot pushed by the foreground service; the page
+// holds no bot state of its own.
 
 import 'package:flutter/material.dart';
 
+import '../design/design.dart';
 import '../shared/ble_protocol.dart';
 import 'bot_link.dart';
 import 'brain/brain_session.dart';
+import 'brain/model_download.dart';
 import 'brain/transcript.dart';
 import 'companion_controller.dart';
 import 'oem_guidance_page.dart';
 import 'service/service_ipc.dart';
+import 'setup/companion_setup.dart';
+import 'setup/companion_setup_page.dart';
 
 class CompanionPage extends StatefulWidget {
   const CompanionPage({super.key});
@@ -38,19 +42,21 @@ class _CompanionPageState extends State<CompanionPage>
     // Coming back from system settings (Notification access, battery):
     // re-read the native state so the cards update without a restart.
     if (state == AppLifecycleState.resumed) {
-      _controller.refreshOemDiagnostics();
+      _controller.refreshSetupFacts();
     }
   }
 
   /// One-time push of the keep-alive guidance after the controller detects
   /// that this phone's cleaner force-stopped the service (vivo/iQOO).
+  /// Only after setup unlocks — mid-wizard the OEM step already covers this.
   void _maybeShowOemGuidance() {
+    if (_controller.setupStep != CompanionSetupStep.done) return;
     if (!_controller.oemGuidancePending || _oemGuidancePushed) return;
     _oemGuidancePushed = true;
     _controller.markOemGuidanceShown();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      Navigator.of(context).push(MaterialPageRoute(
+      Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => OemGuidancePage(controller: _controller),
       ));
     });
@@ -67,274 +73,410 @@ class _CompanionPageState extends State<CompanionPage>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Companion (central)')),
-      body: ListenableBuilder(
-        listenable: _controller,
-        builder: (context, _) {
-          final c = _controller;
-          final s = c.snapshot;
-          return Column(
-            children: [
-              if (c.phaseError != null) _ErrorBanner(message: c.phaseError!),
-              if (s?.linkError != null) _ErrorBanner(message: s!.linkError!),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: [
-                    _ServiceCard(controller: c),
-                    const SizedBox(height: 12),
-                    _AndroidLinkCard(controller: c),
-                    if (s != null) ...[
-                      const SizedBox(height: 12),
-                      _LinkCard(snapshot: s),
-                      const SizedBox(height: 12),
-                      _BrainCard(controller: c, snapshot: s),
-                      const SizedBox(height: 12),
-                      _AudioCard(controller: c, snapshot: s),
-                      const SizedBox(height: 12),
-                      _ControlCard(controller: c, snapshot: s),
-                      const SizedBox(height: 12),
-                      _TranscriptCard(controller: c, snapshot: s),
-                      const SizedBox(height: 12),
-                      _ActivityCard(snapshot: s),
-                    ],
-                  ],
-                ),
-              ),
-            ],
+    return ListenableBuilder(
+      listenable: _controller,
+      builder: (context, _) {
+        final c = _controller;
+        if (!c.setupFactsLoaded) {
+          return const Scaffold(
+            body: Center(child: NdStatusText.loading()),
           );
-        },
-      ),
+        }
+        if (c.setupStep != CompanionSetupStep.done) {
+          return CompanionSetupPage(controller: c);
+        }
+        return _CompanionPanel(controller: c);
+      },
     );
   }
 }
 
-class _ErrorBanner extends StatelessWidget {
-  const _ErrorBanner({required this.message});
-  final String message;
+String _heroWord(CompanionController c) {
+  if (c.phaseError != null) return 'ERROR';
+  switch (c.phase) {
+    case CompanionUiPhase.idle:
+    case CompanionUiPhase.stopped:
+      return 'STOPPED';
+    case CompanionUiPhase.startingService:
+      return 'STARTING';
+    case CompanionUiPhase.running:
+      break;
+  }
+  final s = c.snapshot;
+  if (s == null) return 'WAITING';
+  if (s.linkError != null) return 'ERROR';
+  switch (s.linkState) {
+    case BotLinkState.unauthorized:
+      return 'DENIED';
+    case BotLinkState.unsupported:
+      return 'UNSUPPORTED';
+    case BotLinkState.bluetoothOff:
+      return 'RADIO OFF';
+    case BotLinkState.scanning:
+      return 'SCANNING';
+    case BotLinkState.connecting:
+    case BotLinkState.configuring:
+      return 'LINKING';
+    case BotLinkState.reconnectWait:
+      return 'RECONNECT';
+    case BotLinkState.idle:
+      return 'IDLE';
+    case BotLinkState.ready:
+      break;
+  }
+  return switch (s.brainState) {
+    BrainSessionState.thinking => 'THINKING',
+    BrainSessionState.responding => 'SPEAKING',
+    BrainSessionState.warming => 'WARMING',
+    BrainSessionState.cold => 'COLD',
+    BrainSessionState.ready => 'CONNECTED',
+  };
+}
 
-  @override
-  Widget build(BuildContext context) {
-    return MaterialBanner(
-      backgroundColor: Theme.of(context).colorScheme.errorContainer,
-      content: Text(
-        message,
-        maxLines: 3,
-        overflow: TextOverflow.ellipsis,
-      ),
-      actions: const [SizedBox.shrink()],
-    );
+Color _heroColor(BuildContext context, CompanionController c) {
+  final nd = context.nd;
+  if (c.phaseError != null) return CuteBotSignal.error;
+  switch (c.phase) {
+    case CompanionUiPhase.idle:
+    case CompanionUiPhase.stopped:
+      return nd.colors.textSecondary;
+    case CompanionUiPhase.startingService:
+      return CuteBotSignal.warning;
+    case CompanionUiPhase.running:
+      break;
+  }
+  final s = c.snapshot;
+  if (s == null) return CuteBotSignal.warning;
+  if (s.linkError != null) return CuteBotSignal.error;
+  switch (s.linkState) {
+    case BotLinkState.unauthorized:
+    case BotLinkState.unsupported:
+    case BotLinkState.bluetoothOff:
+      return CuteBotSignal.error;
+    case BotLinkState.scanning:
+    case BotLinkState.connecting:
+    case BotLinkState.configuring:
+    case BotLinkState.reconnectWait:
+      return CuteBotSignal.warning;
+    case BotLinkState.idle:
+      return nd.colors.textSecondary;
+    case BotLinkState.ready:
+      break;
+  }
+  switch (s.brainState) {
+    case BrainSessionState.thinking:
+    case BrainSessionState.responding:
+      return nd.colors.textDisplay;
+    case BrainSessionState.warming:
+    case BrainSessionState.cold:
+      return CuteBotSignal.warning;
+    case BrainSessionState.ready:
+      return CuteBotSignal.success;
   }
 }
 
-class _Chip extends StatelessWidget {
-  const _Chip({required this.label, required this.ok});
-  final String label;
-  final bool ok;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Chip(
-      avatar: Icon(
-        ok ? Icons.check_circle : Icons.radio_button_unchecked,
-        size: 18,
-        color: ok ? Colors.green : scheme.outline,
-      ),
-      label: Text(label),
-    );
-  }
-}
-
-class _ServiceCard extends StatelessWidget {
-  const _ServiceCard({required this.controller});
+class _CompanionPanel extends StatelessWidget {
+  const _CompanionPanel({required this.controller});
   final CompanionController controller;
 
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    final phaseLabel = switch (c.phase) {
-      CompanionUiPhase.idle => 'Idle',
-      CompanionUiPhase.requestingPermissions => 'Requesting permissions…',
-      CompanionUiPhase.permissionDenied => 'Bluetooth permission denied',
-      CompanionUiPhase.startingService => 'Starting service…',
-      CompanionUiPhase.running => 'Service running',
-      CompanionUiPhase.stopped => 'Service stopped',
-    };
-    final running = c.phase == CompanionUiPhase.running;
-    final snapshotAge = c.lastSnapshotAt == null
-        ? null
-        : DateTime.now().difference(c.lastSnapshotAt!);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
+    final s = c.snapshot;
+    final nd = context.nd;
+    final heroWord = _heroWord(c);
+    final heroColor = _heroColor(context, c);
+
+    return Scaffold(
+      body: SafeArea(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('Foreground service',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _Chip(label: phaseLabel, ok: running),
-                _Chip(
-                  label: c.batteryOptimizationExempt
-                      ? 'Battery: unrestricted'
-                      : 'Battery: restricted',
-                  ok: c.batteryOptimizationExempt,
-                ),
-                _Chip(
-                  label: c.notificationAccessGranted
-                      ? 'Alert access: on'
-                      : 'Alert access: off',
-                  ok: c.notificationAccessGranted,
-                ),
-                if (snapshotAge != null)
-                  _Chip(
-                    label: 'Snapshot ${snapshotAge.inSeconds}s ago',
-                    ok: snapshotAge.inSeconds < 10,
-                  ),
-              ],
-            ),
-            // "Show phone alerts on bot": rendered from the snapshot (the
-            // service owns and persists the setting); needs Notification
-            // access to have any effect, so it is disabled until granted.
-            if (c.snapshot != null)
-              Row(
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                CuteBotSpace.lg,
+                CuteBotSpace.md,
+                CuteBotSpace.lg,
+                0,
+              ),
+              child: Row(
                 children: [
-                  const Expanded(child: Text('Show phone alerts on bot')),
-                  Switch(
-                    value: c.snapshot!.phoneAlertsEnabled,
-                    onChanged: c.notificationAccessGranted
-                        ? c.setPhoneAlerts
-                        : null,
-                  ),
+                  const NdBackButton(),
+                  const SizedBox(width: CuteBotSpace.md),
+                  const NdLabel('Companion'),
                 ],
               ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                if (!c.notificationAccessGranted)
-                  FilledButton.tonal(
-                    onPressed: c.openNotificationAccessSettings,
-                    child: const Text('Allow notification access'),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(
+                  CuteBotSpace.lg,
+                  CuteBotSpace.xl,
+                  CuteBotSpace.lg,
+                  CuteBotSpace.xxxl,
+                ),
+                children: [
+                  Text(
+                    heroWord,
+                    style: nd.typography.displayLg.copyWith(color: heroColor),
                   ),
-                if (!c.batteryOptimizationExempt)
-                  FilledButton.tonal(
-                    onPressed: c.requestBatteryExemption,
-                    child: const Text('Allow background'),
+                  const SizedBox(height: CuteBotSpace.sm),
+                  Text(
+                    _secondaryLine(c, s),
+                    style: nd.typography.body.copyWith(color: nd.colors.textSecondary),
                   ),
-                if (running)
-                  OutlinedButton(
-                    onPressed: c.stopService,
-                    child: const Text('Stop service'),
-                  )
-                else
-                  FilledButton(
-                    onPressed: c.restartService,
-                    child: const Text('Start service'),
-                  ),
-                // vivo/iQOO only: the one-time auto-shown guidance stays
-                // reachable, because the cleaner settings can be reverted.
-                if (c.isAggressiveOem)
-                  TextButton(
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => OemGuidancePage(controller: c),
+                  if (c.phaseError != null) ...[
+                    const SizedBox(height: CuteBotSpace.sm),
+                    NdStatusText.error(c.phaseError!),
+                  ],
+                  if (s?.linkError != null) ...[
+                    const SizedBox(height: CuteBotSpace.sm),
+                    NdStatusText.error(s!.linkError!),
+                  ],
+                  const SizedBox(height: CuteBotSpace.xl),
+                  NdMetricTriple(
+                    items: [
+                      (
+                        'Battery',
+                        s?.batteryPercent != null
+                            ? '${s!.batteryPercent}'
+                            : '—',
+                        '%',
+                        null,
                       ),
-                    ),
-                    child: const Text('Keep-alive tips'),
+                      (
+                        'Rssi',
+                        s?.rssi != null ? '${s!.rssi}' : '—',
+                        'dBm',
+                        null,
+                      ),
+                      (
+                        'Ttf',
+                        s?.lastLatency != null
+                            ? '${s!.lastLatency!.firstTokenMs}'
+                            : '—',
+                        'ms',
+                        null,
+                      ),
+                    ],
                   ),
-              ],
+                  if (s?.downloadPercent != null) ...[
+                    const SizedBox(height: CuteBotSpace.xl),
+                    NdGroup(
+                      label: 'Model',
+                      children: [
+                        Text(
+                          downloadProgressLabel(
+                            s!.downloadPercent!,
+                            s.downloadRemainingSec,
+                          ),
+                          style: nd.typography.body,
+                        ),
+                        const SizedBox(height: CuteBotSpace.sm),
+                        NdSegmentedProgress(
+                          value: s.downloadPercent! / 100,
+                        ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: CuteBotSpace.xxl),
+                  _ServiceGroup(controller: c),
+                  const SizedBox(height: CuteBotSpace.xxl),
+                  _AndroidLinkGroup(controller: c),
+                  if (s != null) ...[
+                    const SizedBox(height: CuteBotSpace.xxl),
+                    _LinkGroup(snapshot: s),
+                    const SizedBox(height: CuteBotSpace.xxl),
+                    _BrainGroup(controller: c, snapshot: s),
+                    const SizedBox(height: CuteBotSpace.xxl),
+                    _AudioGroup(controller: c, snapshot: s),
+                    const SizedBox(height: CuteBotSpace.xxl),
+                    _ControlGroup(controller: c, snapshot: s),
+                    const SizedBox(height: CuteBotSpace.xxl),
+                    _TranscriptGroup(controller: c, snapshot: s),
+                    const SizedBox(height: CuteBotSpace.xxl),
+                    _ActivityGroup(snapshot: s),
+                  ],
+                ],
+              ),
             ),
           ],
         ),
       ),
     );
   }
+
+  String _secondaryLine(CompanionController c, ServiceSnapshot? s) {
+    if (s == null) return 'waiting for service snapshot';
+    return 'bot ${s.botState.name}  ·  ${s.brainKind}';
+  }
 }
 
-/// CDM association (M2.5): once linked, Android watches for the bot and
-/// resurrects the foreground service when it comes into range — even from
-/// a dead process (API 31+).
-class _AndroidLinkCard extends StatelessWidget {
-  const _AndroidLinkCard({required this.controller});
+class _ServiceGroup extends StatelessWidget {
+  const _ServiceGroup({required this.controller});
+  final CompanionController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    final running = c.phase == CompanionUiPhase.running;
+    final snapshotAge = c.lastSnapshotAt == null
+        ? null
+        : DateTime.now().difference(c.lastSnapshotAt!);
+    final phaseLabel = switch (c.phase) {
+      CompanionUiPhase.idle => 'Idle',
+      CompanionUiPhase.startingService => 'Starting',
+      CompanionUiPhase.running => 'Running',
+      CompanionUiPhase.stopped => 'Stopped',
+    };
+    return NdGroup(
+      label: 'Service',
+      children: [
+        NdStatRow(label: 'Phase', value: phaseLabel),
+        const NdHairline(),
+        NdStatRow(
+          label: 'Battery',
+          value: c.batteryOptimizationExempt ? 'Unrestricted' : 'Restricted',
+          valueColor: c.batteryOptimizationExempt
+              ? CuteBotSignal.success
+              : CuteBotSignal.warning,
+        ),
+        const NdHairline(),
+        NdStatRow(
+          label: 'Alert access',
+          value: c.notificationAccessGranted ? 'On' : 'Off',
+          valueColor: c.notificationAccessGranted
+              ? CuteBotSignal.success
+              : context.nd.colors.textSecondary,
+        ),
+        if (snapshotAge != null) ...[
+          const NdHairline(),
+          NdStatRow(
+            label: 'Snapshot',
+            value: '${snapshotAge.inSeconds}',
+            unit: 's ago',
+            valueColor: snapshotAge.inSeconds < 10
+                ? CuteBotSignal.success
+                : CuteBotSignal.warning,
+          ),
+        ],
+        if (c.snapshot != null) ...[
+          const NdHairline(),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(
+              children: [
+                const Expanded(child: NdLabel('Phone alerts on bot')),
+                NdToggle(
+                  value: c.snapshot!.phoneAlertsEnabled,
+                  onChanged: c.notificationAccessGranted
+                      ? c.setPhoneAlerts
+                      : null,
+                ),
+              ],
+            ),
+          ),
+        ],
+        const SizedBox(height: CuteBotSpace.md),
+        NdActionWrap(
+          children: [
+            if (!c.notificationAccessGranted)
+              NdButton.secondary(
+                label: 'Allow notification access',
+                onPressed: c.openNotificationAccessSettings,
+              ),
+            if (!c.batteryOptimizationExempt)
+              NdButton.secondary(
+                label: 'Allow background',
+                onPressed: c.requestBatteryExemption,
+              ),
+            if (running)
+              NdButton.destructive(
+                label: 'Stop service',
+                onPressed: c.stopService,
+              )
+            else
+              NdButton.primary(
+                label: 'Start service',
+                onPressed: c.restartService,
+              ),
+            if (c.isAggressiveOem)
+              NdButton.ghost(
+                label: 'Keep-alive tips',
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => OemGuidancePage(controller: c),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _AndroidLinkGroup extends StatelessWidget {
+  const _AndroidLinkGroup({required this.controller});
   final CompanionController controller;
 
   @override
   Widget build(BuildContext context) {
     final link = controller.companionLink;
     final state = link.state;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return NdGroup(
+      label: 'Android link',
+      children: [
+        NdStatRow(
+          label: 'Cdm',
+          value: state.associated
+              ? (state.addresses.firstOrNull ?? 'Linked')
+              : 'Not linked',
+          valueColor: state.associated ? CuteBotSignal.success : null,
+        ),
+        if (state.associated && state.bondState != null) ...[
+          const NdHairline(),
+          NdStatRow(
+            label: 'Pairing',
+            value: state.bondState!,
+            valueColor:
+                state.bondState == 'bonded' ? CuteBotSignal.success : null,
+          ),
+        ],
+        const NdHairline(),
+        NdStatRow(
+          label: 'Wake on approach',
+          value: state.presenceSupported ? 'Supported' : 'Needs Android 12+',
+          valueColor: state.presenceSupported && state.associated
+              ? CuteBotSignal.success
+              : context.nd.colors.textSecondary,
+        ),
+        if (link.lastError != null) ...[
+          const SizedBox(height: CuteBotSpace.sm),
+          NdStatusText.error(link.lastError!),
+        ],
+        const SizedBox(height: CuteBotSpace.md),
+        NdActionWrap(
           children: [
-            Text('Android link (CDM)',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _Chip(
-                  label: state.associated
-                      ? 'Linked ${state.addresses.firstOrNull ?? ''}'
-                      : 'Not linked',
-                  ok: state.associated,
-                ),
-                if (state.associated && state.bondState != null)
-                  _Chip(
-                    label: 'Pairing: ${state.bondState}',
-                    ok: state.bondState == 'bonded',
-                  ),
-                _Chip(
-                  label: state.presenceSupported
-                      ? 'Wake on approach'
-                      : 'No wake-up (needs Android 12+)',
-                  ok: state.presenceSupported && state.associated,
-                ),
-              ],
-            ),
-            if (link.lastError != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text('Error: ${link.lastError}',
-                    style:
-                        TextStyle(color: Theme.of(context).colorScheme.error)),
+            if (!state.associated)
+              NdButton.secondary(
+                label: link.associating ? 'Choosing…' : 'Link bot to Android',
+                onPressed: link.associating ? null : link.associate,
+              )
+            else
+              NdButton.secondary(
+                label: 'Remove link',
+                onPressed: link.disassociate,
               ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                if (!state.associated)
-                  FilledButton.tonal(
-                    onPressed: link.associating ? null : link.associate,
-                    child: Text(link.associating
-                        ? 'Choosing…'
-                        : 'Link bot to Android'),
-                  )
-                else
-                  OutlinedButton(
-                    onPressed: link.disassociate,
-                    child: const Text('Remove link'),
-                  ),
-              ],
-            ),
           ],
         ),
-      ),
+      ],
     );
   }
 }
 
-class _LinkCard extends StatelessWidget {
-  const _LinkCard({required this.snapshot});
+class _LinkGroup extends StatelessWidget {
+  const _LinkGroup({required this.snapshot});
   final ServiceSnapshot snapshot;
 
   @override
@@ -346,217 +488,204 @@ class _LinkCard extends StatelessWidget {
       BotLinkState.bluetoothOff => 'Bluetooth is off',
       BotLinkState.unauthorized => 'Permission missing',
       BotLinkState.unsupported => 'BLE unsupported',
-      BotLinkState.scanning => 'Scanning for bot…',
-      BotLinkState.connecting => 'Connecting…',
-      BotLinkState.configuring => 'Configuring (MTU, GATT)…',
+      BotLinkState.scanning => 'Scanning',
+      BotLinkState.connecting => 'Connecting',
+      BotLinkState.configuring => 'Configuring',
       BotLinkState.ready => 'Connected',
-      BotLinkState.reconnectWait =>
-        'Reconnecting (attempt ${s.reconnectAttempt})…',
+      BotLinkState.reconnectWait => 'Reconnecting ${s.reconnectAttempt}',
     };
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Link', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _Chip(label: stateLabel, ok: ready),
-                if (ready) ...[
-                  _Chip(label: 'MTU ${s.mtu}', ok: s.mtu >= 171),
-                  if (s.botId != null)
-                    _Chip(label: 'Bot …${s.botId}', ok: true),
-                  if (s.rssi != null) _Chip(label: '${s.rssi} dBm', ok: true),
-                ],
-                _Chip(label: 'Bot state: ${s.botState.name}', ok: true),
-              ],
-            ),
-            if (s.batteryPercent != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  'Battery ${s.batteryPercent}% · ${s.batteryMillivolts} mV',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
-          ],
+    return NdGroup(
+      label: 'Link',
+      children: [
+        NdStatRow(
+          label: 'State',
+          value: stateLabel,
+          valueColor: ready ? CuteBotSignal.success : null,
         ),
-      ),
+        if (ready) ...[
+          const NdHairline(),
+          NdStatRow(
+            label: 'Mtu',
+            value: '${s.mtu}',
+            valueColor: s.mtu >= 171 ? CuteBotSignal.success : CuteBotSignal.warning,
+          ),
+          if (s.botId != null) ...[
+            const NdHairline(),
+            NdStatRow(label: 'Bot', value: '…${s.botId}'),
+          ],
+        ],
+        const NdHairline(),
+        NdStatRow(label: 'Bot state', value: s.botState.name),
+        if (s.batteryMillivolts != null) ...[
+          const NdHairline(),
+          NdStatRow(
+            label: 'Millivolts',
+            value: '${s.batteryMillivolts}',
+            unit: 'mV',
+          ),
+        ],
+      ],
     );
   }
 }
 
-class _BrainCard extends StatelessWidget {
-  const _BrainCard({required this.controller, required this.snapshot});
+class _BrainGroup extends StatelessWidget {
+  const _BrainGroup({required this.controller, required this.snapshot});
   final CompanionController controller;
   final ServiceSnapshot snapshot;
 
   @override
   Widget build(BuildContext context) {
     final s = snapshot;
+    final nd = context.nd;
     final stateLabel = switch (s.brainState) {
       BrainSessionState.cold => 'Cold',
-      BrainSessionState.warming => 'Warming up…',
+      BrainSessionState.warming => 'Warming',
       BrainSessionState.ready => 'Ready',
-      BrainSessionState.thinking => 'Thinking…',
-      BrainSessionState.responding => 'Responding…',
+      BrainSessionState.thinking => 'Thinking',
+      BrainSessionState.responding => 'Responding',
     };
     final busy = s.brainState == BrainSessionState.thinking ||
         s.brainState == BrainSessionState.responding;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return NdGroup(
+      label: 'Brain',
+      children: [
+        NdStatRow(
+          label: 'State',
+          value: stateLabel,
+          valueColor: s.brainState == BrainSessionState.ready || busy
+              ? CuteBotSignal.success
+              : CuteBotSignal.warning,
+        ),
+        const NdHairline(),
+        NdStatRow(label: 'Kind', value: s.brainKind),
+        const NdHairline(),
+        NdStatRow(label: 'Replayed', value: '${s.replayedEntries}'),
+        if (s.droppedUtterances > 0) ...[
+          const NdHairline(),
+          NdStatRow(
+            label: 'Dropped',
+            value: '${s.droppedUtterances}',
+            valueColor: CuteBotSignal.error,
+          ),
+        ],
+        if (s.brainError != null) ...[
+          const SizedBox(height: CuteBotSpace.sm),
+          NdStatusText.error(s.brainError!),
+        ],
+        if (s.responseText.isNotEmpty) ...[
+          const SizedBox(height: CuteBotSpace.md),
+          Text(
+            s.responseText,
+            style: nd.typography.body,
+          ),
+        ],
+        if (s.lastLatency != null) ...[
+          const SizedBox(height: CuteBotSpace.sm),
+          Text(s.lastLatency!.summary, style: nd.typography.caption),
+        ],
+        const SizedBox(height: CuteBotSpace.md),
+        NdActionWrap(
           children: [
-            Text('Brain (${s.brainKind})',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _Chip(
-                    label: stateLabel,
-                    ok: s.brainState == BrainSessionState.ready || busy),
-                _Chip(
-                    label: 'Replayed ${s.replayedEntries} entries',
-                    ok: true),
-                if (s.droppedUtterances > 0)
-                  _Chip(label: '${s.droppedUtterances} dropped', ok: false),
-              ],
-            ),
-            if (s.downloadPercent != null) ...[
-              const SizedBox(height: 8),
-              Text('Downloading model ${s.downloadPercent}%'),
-              LinearProgressIndicator(
-                value: s.downloadPercent! / 100,
-              ),
-            ],
-            if (s.brainError != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text('Error: ${s.brainError}',
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.error)),
-              ),
-            if (s.responseText.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text('“${s.responseText}…”',
-                    style: Theme.of(context).textTheme.bodyMedium),
-              ),
-            if (s.lastLatency != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  s.lastLatency!.summary,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                FilledButton.tonal(
-                  onPressed: s.brainState == BrainSessionState.ready
-                      ? controller.simulateUtterance
-                      : null,
-                  child: const Text('Fake utterance'),
-                ),
-              ],
+            NdButton.secondary(
+              label: 'Fake utterance',
+              onPressed: s.brainState == BrainSessionState.ready
+                  ? controller.simulateUtterance
+                  : null,
             ),
           ],
         ),
-      ),
+      ],
     );
   }
 }
 
-class _AudioCard extends StatelessWidget {
-  const _AudioCard({required this.controller, required this.snapshot});
+class _AudioGroup extends StatelessWidget {
+  const _AudioGroup({required this.controller, required this.snapshot});
   final CompanionController controller;
   final ServiceSnapshot snapshot;
 
   @override
   Widget build(BuildContext context) {
     final s = snapshot;
+    final nd = context.nd;
     final stats = s.lastReceive;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return NdGroup(
+      label: 'Audio',
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const NdLabel('Live'),
+          NdToggle(
+            value: s.liveMonitor,
+            onChanged: (_) => controller.toggleLiveMonitor(),
+          ),
+        ],
+      ),
+      children: [
+        if (s.receivingUtterance)
+          const NdStatusText('[RECEIVING]')
+        else if (stats == null)
+          Text(
+            'No utterance received yet. Hold-to-talk on the simulator phone.',
+            style: nd.typography.body.copyWith(color: nd.colors.textSecondary),
+          )
+        else ...[
+          NdStatRow(
+            label: 'Rate',
+            value: stats.realTimeRate.toStringAsFixed(2),
+            unit: '× RT',
+            valueColor: stats.realTimeRate >= 1.0
+                ? CuteBotSignal.success
+                : CuteBotSignal.error,
+          ),
+          const NdHairline(),
+          NdStatRow(
+            label: 'Audio',
+            value: '${stats.audioMillis}',
+            unit: 'ms',
+          ),
+          const NdHairline(),
+          NdStatRow(
+            label: 'Wall',
+            value: '${stats.wallMillis}',
+            unit: 'ms',
+          ),
+          const NdHairline(),
+          NdStatRow(
+            label: 'Frames',
+            value: '${stats.frames} / ${stats.framesLost} lost',
+          ),
+          const NdHairline(),
+          NdStatRow(label: 'Crc', value: stats.checksumHex),
+        ],
+        const SizedBox(height: CuteBotSpace.md),
+        NdActionWrap(
           children: [
-            Row(
-              children: [
-                Text('Audio from bot',
-                    style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                const Text('Live'),
-                Switch(
-                  value: s.liveMonitor,
-                  onChanged: (_) => controller.toggleLiveMonitor(),
-                ),
-              ],
+            NdButton.secondary(
+              label: 'Echo to bot',
+              onPressed: stats != null && s.linkState == BotLinkState.ready
+                  ? controller.echoLastUtterance
+                  : null,
             ),
-            if (s.receivingUtterance)
-              const Text('Receiving…')
-            else if (stats == null)
-              const Text('No utterance received yet. '
-                  'Hold-to-talk on the simulator phone.')
-            else ...[
-              Text(
-                '${stats.realTimeRate.toStringAsFixed(2)}x real time',
-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      color: stats.realTimeRate >= 1.0
-                          ? Colors.green
-                          : Theme.of(context).colorScheme.error,
-                    ),
-              ),
-              Text('${stats.audioMillis} ms audio in ${stats.wallMillis} ms'),
-              Text(
-                '${stats.frames} frames, ${stats.framesLost} lost '
-                '· crc ${stats.checksumHex}',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                FilledButton.tonal(
-                  onPressed: stats != null &&
-                          s.linkState == BotLinkState.ready
-                      ? controller.echoLastUtterance
-                      : null,
-                  child: const Text('Echo to bot'),
-                ),
-              ],
-            ),
-            if (s.lastEcho != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  'Last echo: ${s.lastEcho!.audioMillis} ms audio in '
-                  '${s.lastEcho!.wallMillis} ms '
-                  '(${s.lastEcho!.realTimeRate.toStringAsFixed(2)}x RT)',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
           ],
         ),
-      ),
+        if (s.lastEcho != null) ...[
+          const SizedBox(height: CuteBotSpace.sm),
+          Text(
+            'Last echo: ${s.lastEcho!.audioMillis} ms audio in '
+            '${s.lastEcho!.wallMillis} ms '
+            '(${s.lastEcho!.realTimeRate.toStringAsFixed(2)}x RT)',
+            style: nd.typography.caption,
+          ),
+        ],
+      ],
     );
   }
 }
 
-class _ControlCard extends StatelessWidget {
-  const _ControlCard({required this.controller, required this.snapshot});
+class _ControlGroup extends StatelessWidget {
+  const _ControlGroup({required this.controller, required this.snapshot});
   final CompanionController controller;
   final ServiceSnapshot snapshot;
 
@@ -564,157 +693,128 @@ class _ControlCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = controller;
     final enabled = snapshot.linkState == BotLinkState.ready;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return NdGroup(
+      label: 'Control',
+      children: [
+        NdActionWrap(
           children: [
-            Text('Control', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _LedButton(
-                    color: Colors.red,
-                    onPressed: enabled
-                        ? () => c.setLed(255, 0, 0, LedPattern.solid)
-                        : null),
-                _LedButton(
-                    color: Colors.green,
-                    onPressed: enabled
-                        ? () => c.setLed(0, 255, 0, LedPattern.breathe)
-                        : null),
-                _LedButton(
-                    color: Colors.blue,
-                    onPressed: enabled
-                        ? () => c.setLed(0, 0, 255, LedPattern.blink)
-                        : null),
-                _LedButton(
-                    color: Colors.black26,
-                    label: 'off',
-                    onPressed: enabled
-                        ? () => c.setLed(0, 0, 0, LedPattern.off)
-                        : null),
-                FilledButton.tonal(
-                  onPressed: enabled ? c.wiggle : null,
-                  child: const Text('Wiggle'),
-                ),
-                FilledButton.tonal(
-                  onPressed:
-                      enabled ? () => c.playSound(BotSound.beep) : null,
-                  child: const Text('Beep'),
-                ),
-                FilledButton.tonal(
-                  onPressed: enabled ? c.getBattery : null,
-                  child: const Text('Battery'),
-                ),
-              ],
+            NdLedControl(
+              color: const Color(0xFFFF0000),
+              label: 'Led',
+              onPressed: enabled
+                  ? () => c.setLed(255, 0, 0, LedPattern.solid)
+                  : null,
+            ),
+            NdLedControl(
+              color: const Color(0xFF00FF00),
+              label: 'Led',
+              onPressed: enabled
+                  ? () => c.setLed(0, 255, 0, LedPattern.breathe)
+                  : null,
+            ),
+            NdLedControl(
+              color: const Color(0xFF0000FF),
+              label: 'Led',
+              onPressed: enabled
+                  ? () => c.setLed(0, 0, 255, LedPattern.blink)
+                  : null,
+            ),
+            NdLedControl(
+              color: context.nd.colors.borderVisible,
+              label: 'Off',
+              onPressed: enabled
+                  ? () => c.setLed(0, 0, 0, LedPattern.off)
+                  : null,
+            ),
+            NdButton.secondary(
+              label: 'Wiggle',
+              onPressed: enabled ? c.wiggle : null,
+            ),
+            NdButton.secondary(
+              label: 'Beep',
+              onPressed: enabled ? () => c.playSound(BotSound.beep) : null,
+            ),
+            NdButton.secondary(
+              label: 'Battery',
+              onPressed: enabled ? c.getBattery : null,
             ),
           ],
         ),
-      ),
+      ],
     );
   }
 }
 
-class _LedButton extends StatelessWidget {
-  const _LedButton({required this.color, this.label, this.onPressed});
-  final Color color;
-  final String? label;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return OutlinedButton.icon(
-      onPressed: onPressed,
-      icon: Container(
-        width: 16,
-        height: 16,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      ),
-      label: Text(label ?? 'LED'),
-    );
-  }
-}
-
-class _TranscriptCard extends StatelessWidget {
-  const _TranscriptCard({required this.controller, required this.snapshot});
+class _TranscriptGroup extends StatelessWidget {
+  const _TranscriptGroup({required this.controller, required this.snapshot});
   final CompanionController controller;
   final ServiceSnapshot snapshot;
 
   @override
   Widget build(BuildContext context) {
+    final nd = context.nd;
     final entries = snapshot.transcript;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text('Transcript (persisted)',
-                    style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                TextButton(
-                  onPressed: entries.isEmpty ? null : controller.clearTranscript,
-                  child: const Text('Clear'),
-                ),
-              ],
-            ),
-            if (entries.isEmpty)
-              const Text('Empty. It survives kills and reboots once filled.')
-            else
-              for (final entry in entries.reversed.take(12))
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Text(
-                    '${entry.timestamp.toIso8601String().substring(11, 19)} '
-                    '${switch (entry.role) {
-                      TranscriptRole.user => 'you',
-                      TranscriptRole.bot => 'bot',
-                      TranscriptRole.system => 'sys',
-                    }}: ${entry.text}',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ),
-          ],
-        ),
+    return NdGroup(
+      label: 'Transcript',
+      trailing: NdButton.ghost(
+        label: 'Clear',
+        onPressed: entries.isEmpty ? null : controller.clearTranscript,
       ),
+      children: [
+        if (entries.isEmpty)
+          Text(
+            'Empty. It survives kills and reboots once filled.',
+            style: nd.typography.body.copyWith(color: nd.colors.textDisabled),
+          )
+        else
+          for (final entry in entries.reversed.take(12)) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                '${entry.timestamp.toIso8601String().substring(11, 19)}  '
+                '${switch (entry.role) {
+                  TranscriptRole.user => 'you',
+                  TranscriptRole.bot => 'bot',
+                  TranscriptRole.system => 'sys',
+                }}  ${entry.text}',
+                style: nd.typography.caption.copyWith(color: nd.colors.textPrimary),
+              ),
+            ),
+            const NdHairline(),
+          ],
+      ],
     );
   }
 }
 
-class _ActivityCard extends StatelessWidget {
-  const _ActivityCard({required this.snapshot});
+class _ActivityGroup extends StatelessWidget {
+  const _ActivityGroup({required this.snapshot});
   final ServiceSnapshot snapshot;
 
   @override
   Widget build(BuildContext context) {
+    final nd = context.nd;
     final lines = snapshot.activity;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Service activity',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 4),
-            if (lines.isEmpty)
-              const Text('Nothing yet.')
-            else
-              for (final line in lines.take(20))
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Text(line,
-                      style: Theme.of(context).textTheme.bodySmall),
-                ),
+    return NdGroup(
+      label: 'Activity',
+      children: [
+        if (lines.isEmpty)
+          Text(
+            'Nothing yet.',
+            style: nd.typography.body.copyWith(color: nd.colors.textDisabled),
+          )
+        else
+          for (final line in lines.take(20)) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                line,
+                style: nd.typography.caption.copyWith(color: nd.colors.textPrimary),
+              ),
+            ),
+            const NdHairline(),
           ],
-        ),
-      ),
+      ],
     );
   }
 }

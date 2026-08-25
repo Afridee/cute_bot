@@ -52,6 +52,17 @@ void main() {
     expect(second.whereType<ToolCall>(), isEmpty);
   });
 
+  test('overlapping warmUp shares one load', () async {
+    final brain = FakeBrain(
+      warmUpDelay: const Duration(milliseconds: 40),
+      thinkDelay: Duration.zero,
+      tokenDelay: Duration.zero,
+      prefillDelayPerEntry: Duration.zero,
+    );
+    await Future.wait([brain.warmUp(), brain.warmUp()]);
+    expect(brain.warmUpRuns, 1);
+  });
+
   test('repeat warmUp is a no-op (never re-loads)', () async {
     final brain = FakeBrain(
       warmUpDelay: const Duration(milliseconds: 50),

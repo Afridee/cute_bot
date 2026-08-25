@@ -11,11 +11,17 @@ simulator phone is the same as M1/M2.
 ## First launch (model download)
 
 1. `fvm flutter run` on the companion phone. Pick **Companion**.
-2. Grant BLE / notifications as in M2. Start the service.
-3. The Brain card shows **Gemma 4 E2B** and, on a cold install, a
-   download percentage. First warm-up is **minutes** (download) plus
-   **tens of seconds** (model load). Breathing-blue LEDs on the bot
-   mean warming; utterances during this window are dropped.
+2. A first-run wizard walks notifications, Bluetooth, battery,
+   Notification access, optional CDM link, then the brain download
+   (copy and gating: `Docs/companion-setup.md`). The service starts
+   after Bluetooth so the model can download during the later steps.
+   FakeBrain (`--dart-define=CUTEBOT_FAKE_BRAIN=true`) skips the
+   download wait. The debug panel only opens after the blocking steps.
+3. Once the panel is unlocked, the Brain card shows **Gemma 4 E2B**
+   and, if warm-up is still running, a download percentage. First
+   warm-up is **minutes** (download) plus **tens of seconds** (model
+   load). Breathing-blue LEDs on the bot mean warming; utterances
+   during this window are dropped.
 4. When the card says **Ready**, the model is in memory. Subsequent
    service restarts skip the download and only pay load + chat-create.
 
@@ -103,8 +109,9 @@ real spoken clip — silence is a hostile input for a native-audio model.
 Swipe the companion out of recents. Speak again. The bot should still
 respond (service isolate owns the model). Force-stop / reboot still
 follow the M2.5 keep-alive paths; after resurrection the brain will
-**re-warm** (load + chat-create, no re-download) and replay the last
-16 transcript lines as text into the fresh session.
+**re-warm** (load + chat-create, no re-download). Live turns and
+post-restart turns both clear history and seed the last 16 bot
+transcript lines as text, then submit the current utterance as WAV.
 
 ## Fallback
 

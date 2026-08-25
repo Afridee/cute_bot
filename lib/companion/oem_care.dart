@@ -87,4 +87,25 @@ abstract final class OemCare {
       return false;
     }
   }
+
+  /// System Bluetooth settings — the user has to flip the radio; we cannot.
+  static Future<bool> openBluetoothSettings() async {
+    try {
+      return await _channel.invokeMethod<bool>('openBluetoothSettings') ??
+          false;
+    } catch (e) {
+      Log.w(_tag, 'openBluetoothSettings failed: $e');
+      return false;
+    }
+  }
+
+  /// App details (for POST_NOTIFICATIONS after a permanent deny).
+  static Future<bool> openAppSettings() async {
+    try {
+      return await _channel.invokeMethod<bool>('openAppSettings') ?? false;
+    } catch (e) {
+      Log.w(_tag, 'openAppSettings failed: $e');
+      return false;
+    }
+  }
 }

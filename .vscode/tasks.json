@@ -1,0 +1,25 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "flutter: build apk --release",
+            "type": "shell",
+            "command": "${config:dart.flutterSdkPath}/bin/flutter",
+            "args": [
+                "build",
+                "apk",
+                "--release",
+                "--dart-define-from-file=config.json"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

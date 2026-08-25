@@ -48,6 +48,7 @@ final class BotTaskHandler extends TaskHandler {
   TranscriptStore? _transcript;
   GemmaBrain? _gemma;
   late UtteranceReassembler _reassembler;
+  bool _bringUp = false;
   final List<StreamSubscription> _subscriptions = [];
   final SequenceCounter _controlSeq = SequenceCounter();
   final DateTime _startedAt = DateTime.now();
@@ -58,6 +59,11 @@ final class BotTaskHandler extends TaskHandler {
   bool _receivingUtterance = false;
   DateTime? _utteranceFirstArrival;
   DateTime? _utteranceLastArrival;
+  Timer? _utteranceIdle;
+  DateTime? _lastInboundAt;
+  DateTime? _notifyProbeSentAt;
+  DateTime? _notifyReadyAt;
+  bool _notifyLinkReady = false;
   Int16List? _lastUtterancePcm;
   ReceiveStatsSnapshot? _lastReceive;
   EchoStatsSnapshot? _lastEcho;
@@ -109,6 +115,21 @@ final class BotTaskHandler extends TaskHandler {
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    if (_bringUp) {
+      Log.w(_tag, 'onStart re-entered; keeping existing session');
+      return;
+    }
+    _bringUp = true;
+    try {
+      await _bringUpService(starter);
+    } catch (e, stack) {
+      _bringUp = false;
+      Log.e(_tag, 'onStart failed', e, stack);
+      rethrow;
+    }
+  }
+
+  Future<void> _bringUpService(TaskStarter starter) async {
     Log.i(_tag, 'service starting (starter: ${starter.name})');
     _logActivity('Service started (${starter.name})');
 
@@ -170,7 +191,10 @@ final class BotTaskHandler extends TaskHandler {
   @override
   void onRepeatEvent(DateTime timestamp) {
     // Heartbeat: even with no state churn the UI gets a fresh snapshot,
-    // and a human tailing logcat sees the service is alive.
+    // and a human tailing logcat sees the service is alive. Also cycle a
+    // scan that came up after process resurrection but never hears the bot.
+    _link?.onHeartbeat();
+    _checkNotifyLiveness();
     _pushSnapshot(force: true);
   }
 
@@ -181,12 +205,17 @@ final class BotTaskHandler extends TaskHandler {
     _pendingNotification?.cancel();
     _pendingCaption?.cancel();
     _phoneAlertRestore?.cancel();
+    _utteranceIdle?.cancel();
     for (final sub in _subscriptions) {
       unawaited(sub.cancel());
     }
     _reassembler.reset();
     _session?.dispose();
+    _session = null;
+    _gemma = null;
     _link?.dispose();
+    _link = null;
+    _bringUp = false;
     if (_playbackReady) {
       unawaited(FlutterPcmSound.release());
     }
@@ -244,21 +273,45 @@ final class BotTaskHandler extends TaskHandler {
         _onPhoneAlert(packageName, category);
       case RequestSnapshotUiCommand():
         break; // snapshot goes out below either way
+      case RetryBrainUiCommand():
+        _logActivity('Retrying brain warm-up');
+        unawaited(_session?.start());
     }
     _pushSnapshot(force: true);
   }
 
   // --- inbound audio: radio -> reassembler -> brain ---
 
+  /// End-of-utterance is one BLE notify. With the 20–30% loss we see on
+  /// this link, that frame often never arrives. The reassembler would then
+  /// sit open until the *next* talk. Finalize after this much silence.
+  static const Duration _utteranceIdleTimeout = Duration(milliseconds: 1500);
+
   void _onAudioFrame(AudioChunkMessage message) {
     final now = DateTime.now();
-    if (message.isUtteranceStart || !_receivingUtterance) {
-      _receivingUtterance = true;
+    _markInbound(now);
+    final started = message.isUtteranceStart || !_receivingUtterance;
+    if (started) {
       _utteranceFirstArrival = now;
+      Log.i(_tag, 'utterance started (seq ${message.sequence})');
+      _session?.noteIncomingAudio();
     }
     _utteranceLastArrival = now;
     _reassembler.add(message);
-    if (message.isUtteranceEnd) _pushSnapshot();
+    // add() may have finalized a previous clip (lost-end + new start).
+    _receivingUtterance = _reassembler.inUtterance;
+    if (_receivingUtterance) {
+      _utteranceIdle?.cancel();
+      _utteranceIdle = Timer(_utteranceIdleTimeout, _onUtteranceIdle);
+    }
+    if (started || message.isUtteranceEnd) _pushSnapshot();
+  }
+
+  void _onUtteranceIdle() {
+    _utteranceIdle = null;
+    if (!_receivingUtterance) return;
+    Log.w(_tag, 'utterance end missing, finalizing after idle');
+    _reassembler.reset();
   }
 
   void _onLivePcm(Int16List pcm) {
@@ -268,6 +321,8 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   void _onUtteranceComplete(UtteranceResult result) {
+    _utteranceIdle?.cancel();
+    _utteranceIdle = null;
     _receivingUtterance = false;
     final wallMillis = (_utteranceFirstArrival != null &&
             _utteranceLastArrival != null)
@@ -290,6 +345,8 @@ final class BotTaskHandler extends TaskHandler {
 
     if (result.pcm.isNotEmpty) {
       unawaited(_session?.handleUtterance(AudioClip(pcm: result.pcm)));
+    } else {
+      _session?.cancelListening();
     }
     _pushSnapshot();
   }
@@ -297,6 +354,7 @@ final class BotTaskHandler extends TaskHandler {
   // --- telemetry ---
 
   void _onTelemetry(BotMessage message) {
+    _markInbound(DateTime.now());
     switch (message) {
       case BatteryStatusMessage(:final percent, :final millivolts):
         _batteryPercent = percent;
@@ -530,15 +588,65 @@ final class BotTaskHandler extends TaskHandler {
     final link = _link;
     if (link == null) return;
     if (link.state == BotLinkState.ready) {
+      if (!_notifyLinkReady) {
+        _notifyLinkReady = true;
+        _lastInboundAt = null;
+        _notifyProbeSentAt = null;
+        _notifyReadyAt = DateTime.now();
+      }
       // (Re)connected: the bot may have missed state changes — re-express.
       final session = _session;
       if (session != null) {
         _expressBrainState(session.state,
             hadError: session.lastError != null);
       }
+    } else {
+      _notifyLinkReady = false;
+      _notifyProbeSentAt = null;
+      _notifyReadyAt = null;
     }
     _updateNotification();
     _pushSnapshot();
+  }
+
+  void _markInbound(DateTime at) {
+    _lastInboundAt = at;
+    _notifyProbeSentAt = null;
+  }
+
+  /// Writes still work with a stale CCCD (LED, notification chirps). A
+  /// get_battery that is never answered with telemetry means notifies are
+  /// dead — drop the GATT client and reconnect so CCCD is rewritten.
+  /// Also used after inbound has gone quiet (GATT binder death, BT toggle
+  /// without a disconnect callback): lastInboundAt is stale, not null.
+  void _checkNotifyLiveness() {
+    final link = _link;
+    if (link == null) return;
+    final now = DateTime.now();
+    final action = notifyLivenessAction(
+      state: link.state,
+      now: now,
+      lastInboundAt: _lastInboundAt,
+      probeSentAt: _notifyProbeSentAt,
+      readySince: _notifyReadyAt,
+    );
+    switch (action) {
+      case NotifyLivenessAction.none:
+        break;
+      case NotifyLivenessAction.probe:
+        Log.i(_tag, 'notify liveness probe (get_battery)');
+        _notifyProbeSentAt = now;
+        _sendControl(
+          GetBatteryCommand(sequence: _controlSeq.next()),
+          'notify probe',
+          quiet: true,
+        );
+      case NotifyLivenessAction.reconnect:
+        Log.w(_tag, 'no telemetry after notify probe; forcing reconnect');
+        _notifyProbeSentAt = null;
+        _lastInboundAt = null;
+        unawaited(link.forceReconnect(reason: 'notify liveness'));
+    }
   }
 
   void _sendControl(ControlMessage message, String label,
@@ -624,6 +732,7 @@ final class BotTaskHandler extends TaskHandler {
       brainError: session?.lastError,
       brainKind: _gemma?.kind ?? 'FakeBrain',
       downloadPercent: _gemma?.downloadPercent,
+      downloadRemainingSec: _gemma?.downloadRemainingSec,
       lastLatency: _gemma?.lastLatency,
       replayedEntries: session?.replayedEntries ?? 0,
       droppedUtterances: session?.droppedUtterances ?? 0,
