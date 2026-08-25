@@ -109,7 +109,13 @@ final class SimulatorController extends ChangeNotifier {
 
   Timer? _advertiseWatchdog;
   Timer? _idleAdvertiseRefresh;
+  Timer? _handshakeWatchdog;
   bool _advertiseInFlight = false;
+
+  /// Centrals that attached (ACL) but have not yet written or subscribed.
+  /// CDM/stack can auto-connect after a companion GATT-client death; those
+  /// sessions enable hold-to-talk while notifies go nowhere.
+  final Map<String, DateTime> _unconfirmedAt = {};
 
   /// True after a central leaves until one attaches again. Drives the idle
   /// advertise refresh so a "successful" startAdvertising that is not
@@ -185,6 +191,8 @@ final class SimulatorController extends ChangeNotifier {
         _audioSubscribers.remove(id);
         _telemetrySubscribers.remove(id);
         mtuByCentral.remove(id);
+        _unconfirmedAt.remove(id);
+        _armHandshakeWatchdog();
         // cancelConnection after STATE_DISCONNECTED is what actually
         // releases a bonded/ghost GATT session. Without it, connectable
         // ads fail or are not connectable until the user toggles BT.
@@ -244,6 +252,9 @@ final class SimulatorController extends ChangeNotifier {
         _audioSubscribers.clear();
         _telemetrySubscribers.clear();
         mtuByCentral.clear();
+        _unconfirmedAt.clear();
+        _handshakeWatchdog?.cancel();
+        _handshakeWatchdog = null;
         await _stopTalkingInternal(notifyPeers: false);
         _logActivity('Bluetooth is off');
       case BluetoothLowEnergyState.unsupported:
@@ -538,6 +549,70 @@ final class SimulatorController extends ChangeNotifier {
       }
       notifyListeners();
     }
+    if (reason == 'wrote') {
+      _confirmCentral(id);
+    } else if (reason == 'connected') {
+      final alreadyConfirmed = wasKnown && !_unconfirmedAt.containsKey(id);
+      if (!alreadyConfirmed) {
+        _unconfirmedAt.putIfAbsent(id, DateTime.now);
+        _armHandshakeWatchdog();
+      }
+    }
+  }
+
+  void _confirmCentral(String id) {
+    _unconfirmedAt.remove(id);
+    _armHandshakeWatchdog();
+  }
+
+  void _armHandshakeWatchdog() {
+    _handshakeWatchdog?.cancel();
+    _handshakeWatchdog = null;
+    if (_unconfirmedAt.isEmpty) return;
+    final oldest = _unconfirmedAt.values.reduce(
+        (a, b) => a.isBefore(b) ? a : b);
+    var delay = oldest.add(kUnconfirmedCentralTimeout).difference(DateTime.now());
+    if (delay.isNegative) delay = Duration.zero;
+    _handshakeWatchdog = Timer(delay, () {
+      _handshakeWatchdog = null;
+      unawaited(_dropUnconfirmedCentrals());
+    });
+  }
+
+  Future<void> _dropUnconfirmedCentrals() async {
+    if (_disposed) return;
+    final now = DateTime.now();
+    final staleIds = _unconfirmedAt.entries
+        .where((e) => shouldDropUnconfirmedCentral(
+              now: now,
+              connectedAt: e.value,
+              confirmed: false,
+            ))
+        .map((e) => e.key)
+        .toList();
+    if (staleIds.isEmpty) {
+      _armHandshakeWatchdog();
+      return;
+    }
+    for (final id in staleIds) {
+      if (!_unconfirmedAt.containsKey(id)) continue;
+      final central = _connectedCentrals.remove(id);
+      _audioSubscribers.remove(id);
+      _telemetrySubscribers.remove(id);
+      mtuByCentral.remove(id);
+      _unconfirmedAt.remove(id);
+      final short = id.length > 8 ? id.substring(id.length - 8) : id;
+      _logActivity('$short dropped (no GATT handshake)');
+      Log.w(_tag, 'dropping unconfirmed central $short');
+      if (central != null) await _releaseCentral(central);
+    }
+    notifyListeners();
+    if (!hasConnection) {
+      _expectingCompanion = true;
+      _scheduleAdvertiseRecovery();
+    } else {
+      _armHandshakeWatchdog();
+    }
   }
 
   void _onNotifyState(GATTCharacteristicNotifyStateChangedEventArgs args) {
@@ -555,6 +630,7 @@ final class SimulatorController extends ChangeNotifier {
     }
     if (args.state) {
       registry[id] = args.central;
+      _confirmCentral(id);
     } else {
       registry.remove(id);
     }
@@ -934,6 +1010,8 @@ final class SimulatorController extends ChangeNotifier {
 
   Future<void> _teardown() async {
     _cancelAdvertiseWatchdog(bumpEpoch: true);
+    _handshakeWatchdog?.cancel();
+    _handshakeWatchdog = null;
     await _stopTalkingInternal(notifyPeers: false);
     for (final sub in _bleSubscriptions) {
       await sub.cancel();

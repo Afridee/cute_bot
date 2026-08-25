@@ -112,17 +112,26 @@ bool shouldRefreshStaleScan({
 
 /// After a peripheral Bluetooth toggle, Android may keep the central's
 /// GATT client "connected" without firing disconnect — writes still work,
-/// but CCCD is stale so audio/telemetry notifies never arrive. One
-/// get_battery after the link comes up: if that notify never arrives,
-/// reconnect. Do not probe on a timer — a ghost/cached GATT can answer
-/// battery forever and pin us off the live advertiser.
+/// but CCCD is stale so audio/telemetry notifies never arrive. The same
+/// "ready" lie happens when the native GATT client binder dies: Dart
+/// never sees a disconnect, last inbound is stale, and audio notifies
+/// land in the void. Probe get_battery whenever inbound has gone quiet;
+/// if that notify never arrives, reconnect.
+///
+/// Do not probe while inbound is fresh — a ghost that can still notify
+/// battery would otherwise be kept alive on a timer and pin us off the
+/// live advertiser. Silence is the signal that CCCD (or the client) is
+/// dead.
 const Duration kNotifyProbeGrace = Duration(seconds: 2);
 const Duration kNotifyProbeTimeout = Duration(seconds: 2);
+const Duration kNotifySilenceBeforeProbe = Duration(seconds: 10);
 
 enum NotifyLivenessAction { none, probe, reconnect }
 
 /// [readySince] is when this session became ready. [lastInboundAt] null
-/// means nothing received yet this session.
+/// means nothing received yet this session. A timestamp older than
+/// [silenceBeforeProbe] is treated the same as null: the link looks
+/// ready but is not delivering notifies.
 @visibleForTesting
 NotifyLivenessAction notifyLivenessAction({
   required BotLinkState state,
@@ -132,10 +141,14 @@ NotifyLivenessAction notifyLivenessAction({
   DateTime? readySince,
   Duration probeGrace = kNotifyProbeGrace,
   Duration probeTimeout = kNotifyProbeTimeout,
+  Duration silenceBeforeProbe = kNotifySilenceBeforeProbe,
 }) {
   if (state != BotLinkState.ready) return NotifyLivenessAction.none;
-  // Heard the bot this session — CCCD is live. Stop probing.
-  if (lastInboundAt != null) return NotifyLivenessAction.none;
+  // Heard the bot recently — CCCD is live. Stop probing.
+  if (lastInboundAt != null &&
+      now.difference(lastInboundAt) < silenceBeforeProbe) {
+    return NotifyLivenessAction.none;
+  }
   if (readySince != null && now.difference(readySince) < probeGrace) {
     return NotifyLivenessAction.none;
   }
@@ -819,6 +832,12 @@ final class BotLink extends ChangeNotifier {
           } catch (e) {
             Log.e(_tag, 'control write failed (${bleLogDetail(e)})');
             write.completer.completeError(e);
+            // Native GATT client gone (binder died) or the handle is a
+            // ghost: Dart still says ready. Drop and rescan.
+            if (state == BotLinkState.ready) {
+              unawaited(forceReconnect(reason: 'control write failed'));
+            }
+            break;
           }
         } else {
           final frame = _audioQueue.removeFirst();

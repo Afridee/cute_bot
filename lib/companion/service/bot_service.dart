@@ -617,6 +617,8 @@ final class BotTaskHandler extends TaskHandler {
   /// Writes still work with a stale CCCD (LED, notification chirps). A
   /// get_battery that is never answered with telemetry means notifies are
   /// dead — drop the GATT client and reconnect so CCCD is rewritten.
+  /// Also used after inbound has gone quiet (GATT binder death, BT toggle
+  /// without a disconnect callback): lastInboundAt is stale, not null.
   void _checkNotifyLiveness() {
     final link = _link;
     if (link == null) return;

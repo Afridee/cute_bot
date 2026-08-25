@@ -36,4 +36,41 @@ void main() {
       );
     });
   });
+
+  group('unconfirmed central handshake', () {
+    final now = DateTime(2026, 8, 25, 16, 0, 0);
+
+    test('keeps a central that has written or subscribed', () {
+      expect(
+        shouldDropUnconfirmedCentral(
+          now: now,
+          connectedAt: now.subtract(kUnconfirmedCentralTimeout),
+          confirmed: true,
+        ),
+        isFalse,
+      );
+    });
+
+    test('waits out the handshake window', () {
+      expect(
+        shouldDropUnconfirmedCentral(
+          now: now,
+          connectedAt: now.subtract(const Duration(seconds: 7)),
+          confirmed: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('drops a CDM ghost that never handshakes', () {
+      expect(
+        shouldDropUnconfirmedCentral(
+          now: now,
+          connectedAt: now.subtract(kUnconfirmedCentralTimeout),
+          confirmed: false,
+        ),
+        isTrue,
+      );
+    });
+  });
 }

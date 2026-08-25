@@ -23,6 +23,25 @@ const Duration kAdvertiseMaxBackoff = Duration(seconds: 8);
 /// enough that a ghost GATT session is rebuilt before the FGS returns.
 const Duration kIdleAdvertiseRefresh = Duration(seconds: 45);
 
+/// After a central attaches, a live companion writes CCCD and then a
+/// control frame well inside this window. A CDM/stack auto-connect with
+/// a dead app GATT client never does — drop it so we can advertise
+/// again. Keep this under the companion's inbound-silence probe so the
+/// two sides recover the same ghost.
+const Duration kUnconfirmedCentralTimeout = Duration(seconds: 8);
+
+/// A connected central that has not written or subscribed within
+/// [timeout] of [connectedAt] is a ghost ACL. Confirmed centrals stay.
+bool shouldDropUnconfirmedCentral({
+  required DateTime now,
+  required DateTime connectedAt,
+  required bool confirmed,
+  Duration timeout = kUnconfirmedCentralTimeout,
+}) {
+  if (confirmed) return false;
+  return now.difference(connectedAt) >= timeout;
+}
+
 enum AdvertiseRecoveryAction {
   /// `stopAdvertising` + `startAdvertising` only.
   retryAdvertise,

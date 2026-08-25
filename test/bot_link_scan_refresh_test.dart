@@ -90,16 +90,42 @@ void main() {
       );
     });
 
-    test('does not probe again after inbound arrives', () {
+    test('does not probe while inbound is still fresh', () {
       expect(
         notifyLivenessAction(
           state: BotLinkState.ready,
           now: now,
-          lastInboundAt: now.subtract(const Duration(minutes: 5)),
+          lastInboundAt: now.subtract(const Duration(seconds: 9)),
           probeSentAt: null,
           readySince: now.subtract(const Duration(minutes: 5)),
         ),
         NotifyLivenessAction.none,
+      );
+    });
+
+    test('probes again after inbound has gone quiet', () {
+      expect(
+        notifyLivenessAction(
+          state: BotLinkState.ready,
+          now: now,
+          lastInboundAt: now.subtract(kNotifySilenceBeforeProbe),
+          probeSentAt: null,
+          readySince: now.subtract(const Duration(minutes: 5)),
+        ),
+        NotifyLivenessAction.probe,
+      );
+    });
+
+    test('reconnects if a silence probe stays unanswered', () {
+      expect(
+        notifyLivenessAction(
+          state: BotLinkState.ready,
+          now: now,
+          lastInboundAt: now.subtract(kNotifySilenceBeforeProbe),
+          probeSentAt: now.subtract(kNotifyProbeTimeout),
+          readySince: now.subtract(const Duration(minutes: 5)),
+        ),
+        NotifyLivenessAction.reconnect,
       );
     });
 
