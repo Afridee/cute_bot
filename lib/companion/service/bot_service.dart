@@ -29,9 +29,7 @@ import '../brain/brain_session.dart';
 import '../brain/fake_brain.dart';
 import '../brain/gemma_brain.dart';
 import '../brain/transcript.dart';
-import '../voice/flutter_tts_voice.dart';
-import '../voice/speech_out.dart';
-import '../voice/voice.dart';
+import '../expressions.dart';
 import 'bot_body.dart';
 import 'notification_text.dart';
 import 'service_ipc.dart';
@@ -54,8 +52,6 @@ final class BotTaskHandler extends TaskHandler {
   GemmaBrain? _gemma;
   BotBody? _body;
   TimerStore? _timerStore;
-  ReplySpeaker? _speaker;
-  Voice? _voice;
   final Map<String, Timer> _dartTimers = {};
   Completer<({int percent, int millivolts, bool charging})>? _batteryWaiter;
   late UtteranceReassembler _reassembler;
@@ -110,7 +106,6 @@ final class BotTaskHandler extends TaskHandler {
 
   BrainSessionState? _lastExpressedBrainState;
   BrainSessionState? _lastCaptionBrainState;
-  BrainSessionState? _lastSpeakerBrainState;
   DateTime _lastCaptionAt = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _pendingCaption;
   static const Duration _minCaptionGap = Duration(milliseconds: 200);
@@ -216,7 +211,7 @@ final class BotTaskHandler extends TaskHandler {
     }
 
     await _link!.start();
-    unawaited(_bringUpVoice(useFake: useFake));
+    // Mute: no TTS. BLE audio-out stays for a later play_song tool.
     // Warm-up runs while the link connects; restore timers after the brain
     // is ready so a due timer enters the conversation queue, not a drop.
     unawaited(() async {
@@ -224,29 +219,6 @@ final class BotTaskHandler extends TaskHandler {
       _restoreTimers();
     }());
     _pushSnapshot(force: true);
-  }
-
-  Future<void> _bringUpVoice({required bool useFake}) async {
-    try {
-      final voice = useFake ? FakeVoice() : FlutterTtsVoice();
-      await voice.warmUp();
-      _voice = voice;
-      _speaker = ReplySpeaker(
-        voice: voice,
-        sendFrame: (frame) {
-          final link = _link;
-          if (link == null || link.state != BotLinkState.ready) return;
-          link.sendAudioFrame(frame);
-        },
-        mtu: () => _link?.mtu ?? 23,
-        queuedFrames: () => _link?.queuedAudioFrames ?? 0,
-        onSpeakingChanged: _onBotSpeaking,
-      );
-      Log.i(_tag, 'voice ready (${useFake ? 'FakeVoice' : 'FlutterTtsVoice'})');
-    } catch (e, stack) {
-      Log.e(_tag, 'TTS warm-up failed; captions only', e, stack);
-      _logActivity('TTS unavailable: $e');
-    }
   }
 
   @override
@@ -281,9 +253,6 @@ final class BotTaskHandler extends TaskHandler {
     _gemma = null;
     _body = null;
     _timerStore = null;
-    unawaited(_voice?.dispose());
-    _voice = null;
-    _speaker = null;
     _link?.dispose();
     _link = null;
     _bringUp = false;
@@ -361,9 +330,6 @@ final class BotTaskHandler extends TaskHandler {
   void _onAudioFrame(AudioChunkMessage message) {
     final now = DateTime.now();
     _markInbound(now);
-    // Half-duplex: drop bot-mic frames while we are talking so the model
-    // does not hear its own TTS (the two-phone AEC masks this; ESP32 will not).
-    if (_speaker?.speaking == true) return;
     final started = message.isUtteranceStart || !_receivingUtterance;
     if (started) {
       _utteranceFirstArrival = now;
@@ -465,48 +431,20 @@ final class BotTaskHandler extends TaskHandler {
       _expressBrainState(session.state, hadError: session.lastError != null);
     }
     _pushCaption(session);
-    _pushSpeech(session);
     _updateNotification();
     _pushSnapshot();
   }
 
-  void _pushSpeech(BrainSession session) {
-    final speaker = _speaker;
-    if (speaker == null) return;
-    final prev = _lastSpeakerBrainState;
-    if (session.state == BrainSessionState.thinking &&
-        prev != BrainSessionState.thinking &&
-        prev != BrainSessionState.responding) {
-      unawaited(speaker.beginTurn());
-    }
-    if (session.state == BrainSessionState.responding &&
-        session.responseText.isNotEmpty) {
-      unawaited(speaker.update(session.responseText, isFinal: false));
-    }
-    if (prev == BrainSessionState.responding &&
-        session.state == BrainSessionState.ready &&
-        session.lastResponseText.isNotEmpty) {
-      unawaited(speaker.update(session.lastResponseText, isFinal: true));
-    }
-    _lastSpeakerBrainState = session.state;
-  }
-
-  void _onBotSpeaking(bool speaking) {
-    if (speaking) {
-      _reassembler.reset();
-      _receivingUtterance = false;
-      _utteranceIdle?.cancel();
-      _session?.cancelListening();
-    }
-    _pushSnapshot();
-  }
-
   /// Optional subtitle for a display bot (simulator). Speaker-only ESP32
-  /// firmware ACKs and ignores [ShowTextCommand]. Streaming captions use
-  /// write-with-response and would jump ahead of TTS audio — only send
-  /// them when TTS is unavailable, plus the finished caption for the
-  /// simulator screen.
+  /// firmware ACKs and ignores [ShowTextCommand]. Mute path: the caption
+  /// is the compact tool line (`express(delighted)`), not speech.
   void _pushCaption(BrainSession session) {
+    if (session.state == BrainSessionState.thinking) {
+      final mood = systemMoodForBrainState(session.state);
+      if (mood != null) {
+        _sendCaption(mood.name, isFinal: false);
+      }
+    }
     if (session.state == BrainSessionState.responding &&
         session.responseText.isNotEmpty) {
       _sendCaption(session.responseText, isFinal: false);
@@ -522,7 +460,6 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   void _sendCaption(String text, {required bool isFinal, bool force = false}) {
-    if (!isFinal && _speaker != null) return;
     if (!isFinal && !force) {
       final now = DateTime.now();
       final elapsed = now.difference(_lastCaptionAt);
@@ -573,18 +510,24 @@ final class BotTaskHandler extends TaskHandler {
     return Uint8List.fromList(bytes.sublist(0, end));
   }
 
-  /// Shows the brain's state on the bot's body. This is the M2 human bar:
-  /// with the UI dead, a spoken utterance still visibly moves the bot.
+  /// Shows warming / thinking on the bot's body via the expression catalog.
+  /// Ready and responding do not overwrite — model `express()` is the face.
   void _expressBrainState(BrainSessionState state, {required bool hadError}) {
+    final mood = systemMoodForBrainState(state);
+    if (mood != null) {
+      _body?.showMood(mood, labelPrefix: 'system', quiet: true);
+      return;
+    }
+    if (state == BrainSessionState.responding ||
+        state == BrainSessionState.ready) {
+      return;
+    }
     final led = switch (state) {
-      // Warming: breathing blue — reload/re-prefill in progress.
-      BrainSessionState.warming => (0, 60, 255, LedPattern.breathe),
-      BrainSessionState.thinking => (255, 180, 0, LedPattern.breathe),
-      BrainSessionState.responding => (0, 255, 80, LedPattern.solid),
-      BrainSessionState.ready => (0, 0, 0, LedPattern.off),
       BrainSessionState.cold =>
         hadError ? (255, 0, 0, LedPattern.blink) : (0, 0, 0, LedPattern.off),
+      _ => null,
     };
+    if (led == null) return;
     _sendControl(
         SetLedCommand(
           sequence: _controlSeq.next(),
@@ -595,12 +538,6 @@ final class BotTaskHandler extends TaskHandler {
         ),
         'led ${state.name}',
         quiet: true);
-    if (state == BrainSessionState.responding) {
-      _sendControl(
-          PlaySoundCommand(sequence: _controlSeq.next(), sound: BotSound.chirp),
-          'chirp (response start)',
-          quiet: true);
-    }
   }
 
   /// Tool calls from the brain, mapped onto BLE / timers / battery.
@@ -648,7 +585,7 @@ final class BotTaskHandler extends TaskHandler {
     Log.i(_tag, 'timer ${timer.id} fired (${timer.label})');
     await _session?.handleCue(
       "A timer just finished: '${timer.label}'. "
-      'Tell the human in one short spoken sentence. Call a tool if it fits.',
+      'Call express(alarm). Do not speak.',
     );
   }
 

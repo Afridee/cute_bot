@@ -83,7 +83,7 @@ void main() {
     await session.handleUtterance(_clip(1500));
 
     expect(session.state, BrainSessionState.ready);
-    expect(session.lastResponseText, isNotEmpty);
+    expect(session.lastResponseText, 'express(happy)');
 
     // Persisted, not just in memory: a fresh store sees both lines.
     final recovered = await TranscriptStore(backing).load();
@@ -91,7 +91,7 @@ void main() {
     expect(recovered[0].role, TranscriptRole.user);
     expect(recovered[0].text, '(voice, 1.5 s)');
     expect(recovered[1].role, TranscriptRole.bot);
-    expect(recovered[1].text, session.lastResponseText);
+    expect(recovered[1].text, 'express(happy)');
   });
 
   test('turns are serialized, never concurrent', () async {
@@ -145,9 +145,10 @@ void main() {
       onToolCall: calls.add,
     );
     await session.start();
-    await session.handleUtterance(_clip()); // FakeBrain: 1st turn has a tool
+    await session.handleUtterance(_clip()); // FakeBrain: first turn is express
     expect(calls, hasLength(1));
-    expect(calls.single.name, 'set_led');
+    expect(calls.single.name, 'express');
+    expect(calls.single.arguments['mood'], 'happy');
   });
 
   test('noteIncomingAudio flips ready to thinking; cancelListening reverts',
@@ -205,7 +206,7 @@ void main() {
         isEmpty);
   });
 
-  test('handleCue serializes behind a spoken turn and persists the reply',
+  test('handleCue serializes behind a spoken turn and persists the expression',
       () async {
     final brain = _GatedBrain();
     final session = BrainSession(

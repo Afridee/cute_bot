@@ -573,10 +573,10 @@ class _BrainGroup extends StatelessWidget {
           const SizedBox(height: CuteBotSpace.sm),
           NdStatusText.error(s.brainError!),
         ],
-        if (s.responseText.isNotEmpty) ...[
+        if (s.responseText.isNotEmpty || s.lastResponseText.isNotEmpty) ...[
           const SizedBox(height: CuteBotSpace.md),
           Text(
-            s.responseText,
+            s.responseText.isNotEmpty ? s.responseText : s.lastResponseText,
             style: nd.typography.body,
           ),
         ],

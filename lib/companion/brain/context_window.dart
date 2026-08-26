@@ -1,10 +1,11 @@
-/// Rolling text window seeded into Gemma's chat before each utterance.
+/// Rolling text window of recent bot expressions.
 ///
-/// Pure: no flutter_gemma. Live turns and kill → re-warm use the same
-/// seeder so every respond() looks like a restart — one current WAV plus
-/// a short tail of recent bot (and system) text. User "(voice, …)"
-/// placeholders stay in [TranscriptStore] / UI; they teach the model
-/// nothing.
+/// Pure: no flutter_gemma. Kept for the transcript UI and for a future
+/// path that can replay turns as real user/model messages. GemmaBrain
+/// must **not** [addQueryChunk] this tail today: LiteRT-LM concatenates
+/// every chunk into one user prompt, so `express(playful)` in the seed
+/// becomes the answer. User "(voice, …)" placeholders stay in
+/// [TranscriptStore] / UI; they teach the model nothing.
 library;
 
 import 'transcript.dart';
@@ -13,11 +14,11 @@ import 'transcript.dart';
 /// + this must fit in the model's token window.
 const int kContextEntryCap = 16;
 
-/// Bot and system lines to seed, chronological, capped at [cap].
+/// Bot and system lines, chronological, capped at [cap].
 ///
 /// Drops the current user placeholder BrainSession just appended
 /// (`(voice, 1.2 s)`) — that turn is the audio clip, not text — and
-/// every other user voice stub. User text is never seeded.
+/// every other user voice stub. User text is never included.
 List<TranscriptEntry> rollingTextWindow(
   List<TranscriptEntry> transcript, {
   int cap = kContextEntryCap,

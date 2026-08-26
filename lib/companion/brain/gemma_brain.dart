@@ -3,9 +3,9 @@
 /// Lives in the foreground-service isolate next to BotLink. One long-lived
 /// chat, one serialized conversation (BrainSession already enforces that).
 /// Native audio in, native function-call tokens out — no STT stage, no
-/// regex-parsed tools. Each turn clears history, seeds a short rolling
-/// text tail of recent bot replies, then submits the current WAV. Old
-/// audio clips are not kept in the token window.
+/// regex-parsed tools. The bot is mute: a turn is one (or a few) tool
+/// calls, not spoken text. Each turn clears history, then submits the
+/// current WAV. Old audio clips are not kept in the token window.
 library;
 
 import 'dart:async';
@@ -24,7 +24,6 @@ import 'gemma_init.dart';
 import 'latency_trace.dart';
 import 'model_download.dart';
 import 'pcm16.dart';
-import 'transcript.dart';
 
 const String _tag = 'GemmaBrain';
 
@@ -33,8 +32,8 @@ const String _tag = 'GemmaBrain';
 /// is too small — it does not degrade.
 const int kGemmaMaxTokens = 4096;
 
-/// Cap on generated tokens. A desk robot that monologues is not cute, and
-/// decode time is on the latency budget. Kept in lockstep with the persona.
+/// Cap on generated tokens. Kept in lockstep with the persona — must cover
+/// Gemma 4's hidden thought block plus one tool-call blob.
 const int kGemmaMaxOutputTokens = kPersonaMaxOutputTokens;
 
 typedef ToolExecutor = Future<Map<String, dynamic>> Function(
@@ -234,7 +233,7 @@ final class GemmaBrain implements BotBrain {
       tools: kBotTools,
       isThinking: false,
       modelType: ModelType.gemma4,
-      toolChoice: ToolChoice.auto,
+      toolChoice: ToolChoice.required,
       systemInstruction: kPersonaSystemInstruction,
       maxOutputTokens: kGemmaMaxOutputTokens,
     );
@@ -315,12 +314,10 @@ final class GemmaBrain implements BotBrain {
     var completed = false;
 
     await for (final event in _generateTurn()) {
-      if (event is TextDelta) {
-        if (decodeWatch == null) {
-          firstTokenMs = totalWatch.elapsedMilliseconds;
-          firstTokenText = event.text;
-          decodeWatch = Stopwatch()..start();
-        }
+      if (event is ToolCall && decodeWatch == null) {
+        firstTokenMs = totalWatch.elapsedMilliseconds;
+        firstTokenText = event.transcriptLine;
+        decodeWatch = Stopwatch()..start();
       }
       yield event;
       if (event is Done || event is BrainError) {
@@ -350,70 +347,115 @@ final class GemmaBrain implements BotBrain {
     if (!completed) yield const Done();
   }
 
-  /// One user turn, including the tool-call → tool-response loop. Yields
-  /// [ToolCall] the moment the model emits one so the bot can move before
-  /// the spoken follow-up starts.
+  /// One user turn. Yields [ToolCall]s as they land so the body can move
+  /// immediately. Continues the generate loop only when a result is
+  /// informational ([needsToolFollowUp]); `express` / `set_timer` are
+  /// terminal — no spoken follow-up decode.
+  ///
+  /// Gemma 4 often thinks (or copies the few-shot `express(mood)` line)
+  /// as text instead of a native `<|tool_call>`. Those tokens are not
+  /// spoken, but if no structured call arrives we recover the compact
+  /// line so the body still moves.
   Stream<BrainEvent> _generateTurn() async* {
     const maxToolTurns = 6;
     for (var turn = 0; turn < maxToolTurns; turn++) {
-      final pending = <FunctionCallResponse>[];
+      final pending = <ToolCall>[];
+      final leaked = StringBuffer();
       await for (final response in _chat!.generateChatResponseAsync()) {
         switch (response) {
           case TextResponse(:final token):
-            if (token.isNotEmpty) yield TextDelta(token);
+            leaked.write(token);
           case FunctionCallResponse():
-            pending.add(response);
-            yield ToolCall(
+            pending.add(ToolCall(
               response.name,
               Map<String, Object?>.from(response.args),
-            );
+            ));
+            yield pending.last;
           case ParallelFunctionCallResponse(:final calls):
             for (final call in calls) {
-              pending.add(call);
-              yield ToolCall(call.name, Map<String, Object?>.from(call.args));
+              pending.add(ToolCall(
+                call.name,
+                Map<String, Object?>.from(call.args),
+              ));
+              yield pending.last;
             }
-          case ThinkingResponse():
-            // isThinking is false; ignore if the model still emits some.
-            break;
+          case ThinkingResponse(:final content):
+            leaked.write(content);
         }
       }
       if (pending.isEmpty) {
-        yield const Done();
-        return;
+        final recovered = parseLeakedToolCalls(leaked.toString());
+        if (recovered.isEmpty) {
+          if (leaked.isNotEmpty) {
+            Log.w(_tag, 'no tool call; dropped text: ${_preview(leaked)}');
+          } else {
+            Log.w(_tag, 'generate finished with no tokens and no tool call');
+          }
+          yield const Done();
+          return;
+        }
+        Log.w(
+          _tag,
+          'recovered ${recovered.length} tool call(s) from leaked text: '
+          '${recovered.map((c) => c.transcriptLine).join('; ')}',
+        );
+        pending.addAll(recovered);
+        for (final call in recovered) {
+          yield call;
+        }
       }
+      final followUp = pending.any((c) => needsToolFollowUp(c.name));
       for (final call in pending) {
-        final args = Map<String, dynamic>.from(call.args);
+        final args = Map<String, dynamic>.from(call.arguments);
         final result = executeTool != null
             ? await executeTool!(call.name, args)
             : stubToolResult(call.name, args);
-        await _chat!.addQueryChunk(Message.toolResponse(
-          toolName: call.name,
-          response: result,
-        ));
+        if (followUp) {
+          await _chat!.addQueryChunk(Message.toolResponse(
+            toolName: call.name,
+            response: result,
+          ));
+        }
+      }
+      if (!followUp) {
+        yield const Done();
+        return;
       }
     }
     Log.w(_tag, 'hit max tool turns without a final answer');
     yield const Done();
   }
 
-  /// Drop the previous turn's native audio (and Dart history), then seed
-  /// the rolling bot-text window. Called at the start of each [respond],
-  /// never mid tool-call loop.
+  static String _preview(StringBuffer leaked) {
+    final text = leaked.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.length <= 180) return text;
+    return '${text.substring(0, 180)}…';
+  }
+
+  /// Drop the previous turn's native audio (and Dart history). Called at
+  /// the start of each [respond], never mid tool-call loop.
   ///
   /// Path: [InferenceChat.clearHistory] (flutter_gemma 1.6.3). That closes
   /// the LiteRT-LM conversation and [createSession]s a fresh one via the
   /// chat's `sessionCreator` — same tools, systemInstruction, supportAudio.
   /// The model stays loaded; we do not [createChat] per turn.
+  ///
+  /// Do not [addQueryChunk] the rolling expression tail. LiteRT-LM buffers
+  /// every chunk and sends them as *one* user message at generate time
+  /// (`role: user`, concatenated text + the WAV). Pasting `express(playful)`
+  /// into that prompt makes the model copy it every turn.
   Future<void> _resetAndSeed(ConversationContext ctx) async {
     final prior = rollingTextWindow(ctx.transcript);
     await _chat!.clearHistory();
-    Log.i(_tag, 'cleared history, seeded ${prior.length} text lines');
-    for (final entry in prior) {
-      await _chat!.addQueryChunk(Message.text(
-        text: entry.text,
-        isUser: entry.role == TranscriptRole.user,
-      ));
+    if (prior.isEmpty) {
+      Log.i(_tag, 'cleared history');
+      return;
     }
+    final preview = prior.map((e) => e.text).join('; ');
+    Log.i(
+      _tag,
+      'cleared history, skipped seed of ${prior.length} line(s): $preview',
+    );
   }
 
   void _clearDownloadProgress() {

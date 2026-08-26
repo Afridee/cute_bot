@@ -4,10 +4,13 @@
 import 'dart:typed_data';
 
 import 'package:cute_bot/companion/brain/bot_tools.dart';
+import 'package:cute_bot/companion/brain/brain_session.dart';
 import 'package:cute_bot/companion/brain/context_window.dart';
 import 'package:cute_bot/companion/brain/latency_trace.dart';
 import 'package:cute_bot/companion/brain/pcm16.dart';
 import 'package:cute_bot/companion/brain/transcript.dart';
+import 'package:cute_bot/companion/expressions.dart';
+import 'package:cute_bot/companion/persona.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -120,8 +123,86 @@ void main() {
 
   group('stubToolResult', () {
     test('known tools return status, unknown tools error', () {
-      expect(stubToolResult('wiggle', const {}), containsPair('status', 'ok'));
+      expect(stubToolResult('express', const {'mood': 'happy'}),
+          containsPair('status', 'ok'));
       expect(stubToolResult('nope', const {})['error'], contains('unknown'));
+      expect(needsToolFollowUp('get_battery'), isTrue);
+      expect(needsToolFollowUp('express'), isFalse);
+      expect(needsToolFollowUp('set_timer'), isFalse);
+    });
+
+    test('model-facing tools are express, set_timer, get_battery', () {
+      expect(kBotTools.map((t) => t.name).toList(),
+          ['express', 'set_timer', 'get_battery']);
+    });
+  });
+
+  group('expressions', () {
+    test('every BotMood has a catalog row', () {
+      for (final mood in BotMood.values) {
+        expect(kExpressions[mood], isNotNull, reason: mood.name);
+        expect(expressionFor(mood.name)?.mood, mood);
+      }
+    });
+
+    test('unknown mood is null', () {
+      expect(expressionFor('explode'), isNull);
+      expect(expressionFor(null), isNull);
+    });
+
+    test('systemMoodForBrainState maps lifecycle to catalog moods', () {
+      expect(systemMoodForBrainState(BrainSessionState.thinking),
+          BotMood.curious);
+      expect(systemMoodForBrainState(BrainSessionState.warming),
+          BotMood.sleepy);
+      expect(systemMoodForBrainState(BrainSessionState.ready), isNull);
+      expect(systemMoodForBrainState(BrainSessionState.responding), isNull);
+      expect(systemMoodForBrainState(BrainSessionState.cold), isNull);
+    });
+  });
+
+  group('persona budget', () {
+    test('decode cap leaves room for Gemma 4 thought plus a tool call', () {
+      expect(kPersonaMaxOutputTokens, 192);
+      expect(kPersonaMaxOutputTokens, greaterThanOrEqualTo(128));
+    });
+  });
+
+  group('parseLeakedToolCalls', () {
+    test('recovers the few-shot express(mood) line', () {
+      final calls = parseLeakedToolCalls('express(curious)');
+      expect(calls, hasLength(1));
+      expect(calls.single.name, 'express');
+      expect(calls.single.arguments['mood'], 'curious');
+    });
+
+    test('recovers express after thought prose', () {
+      final calls = parseLeakedToolCalls(
+        '<|channel>thought\nuser said hi so I should greet\n'
+        '<channel|>express(happy)',
+      );
+      expect(calls.single.transcriptLine, 'express(happy)');
+    });
+
+    test('recovers set_timer then express in one blob', () {
+      final calls = parseLeakedToolCalls('set_timer(3, tea) then express(yes)');
+      expect(calls.map((c) => c.transcriptLine).toList(),
+          ['set_timer(3, tea)', 'express(yes)']);
+    });
+
+    test('strips quotes on timer labels', () {
+      final calls = parseLeakedToolCalls('set_timer(5, "steep")');
+      expect(calls.single.arguments['label'], 'steep');
+    });
+
+    test('ignores unknown moods and empty text', () {
+      expect(parseLeakedToolCalls(''), isEmpty);
+      expect(parseLeakedToolCalls('express(explode)'), isEmpty);
+      expect(parseLeakedToolCalls('hello there'), isEmpty);
+    });
+
+    test('recovers get_battery()', () {
+      expect(parseLeakedToolCalls('get_battery()').single.name, 'get_battery');
     });
   });
 

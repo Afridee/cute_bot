@@ -9,6 +9,7 @@ import 'dart:async';
 
 import '../../shared/ble_protocol.dart';
 import '../../shared/log.dart';
+import '../expressions.dart';
 import 'timer_store.dart';
 
 const String _tag = 'BotBody';
@@ -47,6 +48,8 @@ final class BotBody {
   Future<ToolInvokeResult> invoke(
       String name, Map<String, Object?> args) async {
     switch (name) {
+      case 'express':
+        return _express(args);
       case 'set_led':
         final rgb = ledColor(args['color']);
         sendControl(
@@ -98,6 +101,50 @@ final class BotBody {
         Log.w(_tag, 'unhandled tool: $name');
         return ToolInvokeResult({'error': 'unknown tool $name'});
     }
+  }
+
+  /// Actuates one catalog mood on the bot (LED + optional sound / wiggle).
+  /// Used by `express` tools and phone-side lifecycle states (thinking, warming).
+  void showMood(BotMood mood, {String labelPrefix = 'mood', bool quiet = false}) {
+    final spec = kExpressions[mood];
+    if (spec == null) return;
+    final rgb = ledColor(spec.color);
+    sendControl(
+      SetLedCommand(
+        sequence: nextSequence(),
+        red: rgb.$1,
+        green: rgb.$2,
+        blue: rgb.$3,
+        pattern: ledPattern(spec.pattern),
+      ),
+      '$labelPrefix ${spec.mood.name}',
+      quiet: quiet,
+    );
+    if (spec.sound != null) {
+      sendControl(
+        PlaySoundCommand(
+            sequence: nextSequence(), sound: botSound(spec.sound)),
+        '$labelPrefix sound',
+        quiet: quiet,
+      );
+    }
+    if (spec.wiggle) {
+      sendControl(
+          WiggleCommand(sequence: nextSequence()), '$labelPrefix wiggle',
+          quiet: quiet);
+    }
+  }
+
+  Future<ToolInvokeResult> _express(Map<String, Object?> args) async {
+    final spec = expressionFor(args['mood']);
+    if (spec == null) {
+      return ToolInvokeResult({'error': 'unknown mood ${args['mood']}'});
+    }
+    showMood(spec.mood, labelPrefix: 'tool express');
+    return ToolInvokeResult({
+      'status': 'ok',
+      'mood': spec.mood.name,
+    });
   }
 
   Future<ToolInvokeResult> _setTimer(Map<String, Object?> args) async {

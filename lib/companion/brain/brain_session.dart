@@ -53,8 +53,8 @@ final class BrainSession extends ChangeNotifier {
 
   /// Structured tool calls surface here so FakeBrain (which has no live
   /// executor) can still move the bot. GemmaBrain dispatches inside the
-  /// generate loop via its executeTool callback so the model gets a real
-  /// tool result before it speaks.
+  /// generate loop via its executeTool callback so the body moves before
+  /// the turn ends. The compact tool line is also the transcript entry.
   final void Function(ToolCall call)? onToolCall;
 
   BrainSessionState state = BrainSessionState.cold;
@@ -64,7 +64,8 @@ final class BrainSession extends ChangeNotifier {
   /// proof that persistence survived the kill.
   int replayedEntries = 0;
 
-  /// Response text accumulated so far for the in-flight turn.
+  /// Response text accumulated so far for the in-flight turn. Mute path:
+  /// this is the compact tool line (`express(delighted)`), not speech.
   String responseText = '';
 
   /// Full text of the last completed turn.
@@ -189,6 +190,12 @@ final class BrainSession extends ChangeNotifier {
             notifyListeners();
           case ToolCall():
             Log.i(_tag, 'tool call: $event');
+            if (state != BrainSessionState.responding) {
+              state = BrainSessionState.responding;
+            }
+            if (responseText.isNotEmpty) responseText += '; ';
+            responseText += event.transcriptLine;
+            notifyListeners();
             onToolCall?.call(event);
           case Done():
             completed = true;
@@ -245,6 +252,12 @@ final class BrainSession extends ChangeNotifier {
             notifyListeners();
           case ToolCall():
             Log.i(_tag, 'tool call: $event');
+            if (state != BrainSessionState.responding) {
+              state = BrainSessionState.responding;
+            }
+            if (responseText.isNotEmpty) responseText += '; ';
+            responseText += event.transcriptLine;
+            notifyListeners();
             onToolCall?.call(event);
           case Done():
             completed = true;

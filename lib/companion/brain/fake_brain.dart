@@ -1,6 +1,7 @@
 /// Canned-response brain (M2). Lets M1/M2 be built and tested without the
-/// model: realistic delays, streaming text deltas, occasional tool calls —
-/// the same event shapes GemmaBrain (M3) will produce.
+/// model: realistic delays, occasional tool calls — the same event shapes
+/// GemmaBrain (M3) produces. Mute: every turn is an `express` tool, no
+/// spoken [TextDelta]s.
 ///
 /// Delays are injectable so unit tests run at Duration.zero.
 library;
@@ -24,11 +25,12 @@ final class FakeBrain implements BotBrain {
   /// Stands in for prefill + first token.
   final Duration thinkDelay;
 
-  /// Stands in for per-token decode.
+  /// Unused (mute — no per-token speech). Kept so existing test constructors
+  /// keep compiling.
   final Duration tokenDelay;
 
   /// Stands in for re-prefill cost. FakeBrain sees the full transcript
-  /// (including user voice stubs); GemmaBrain seeds a rolling bot-text
+  /// (including user voice stubs); GemmaBrain seeds a rolling expression
   /// window instead. Fine for tests. Applied per context entry on respond.
   final Duration prefillDelayPerEntry;
 
@@ -40,15 +42,12 @@ final class FakeBrain implements BotBrain {
   /// How many times the delay body ran. Overlapping [warmUp] calls share one.
   int warmUpRuns = 0;
 
-  static final List<String Function(AudioClip clip)> _responses = [
-    (clip) {
-      final secs = (clip.duration.inMilliseconds / 1000).toStringAsFixed(1);
-      return 'Ooh, I heard you talk for $secs seconds! Tell me more?';
-    },
-    (_) => 'Beep! I am just a little desk robot, but I am listening.',
-    (_) => 'That sounds exciting! My LEDs are tingling.',
-    (_) => 'I will remember that. Well... after M3 I will.',
-    (_) => 'Wiggle wiggle! Sorry, I got carried away.',
+  static const _moods = [
+    'happy',
+    'curious',
+    'delighted',
+    'playful',
+    'yes',
   ];
 
   @override
@@ -79,19 +78,8 @@ final class FakeBrain implements BotBrain {
     await Future<void>.delayed(
         thinkDelay + prefillDelayPerEntry * ctx.transcript.length);
 
-    final index = _responseCounter++;
-
-    // Every third response exercises the tool-call path (shape of M4).
-    if (index % 3 == 0) {
-      yield const ToolCall(
-          'set_led', {'color': 'pink', 'pattern': 'blink'});
-    }
-
-    final words = _responses[index % _responses.length](audio).split(' ');
-    for (var i = 0; i < words.length; i++) {
-      await Future<void>.delayed(tokenDelay);
-      yield TextDelta(i == 0 ? words[i] : ' ${words[i]}');
-    }
+    final mood = _moods[_responseCounter++ % _moods.length];
+    yield ToolCall('express', {'mood': mood});
     yield const Done();
   }
 
@@ -104,22 +92,8 @@ final class FakeBrain implements BotBrain {
       return;
     }
     await Future<void>.delayed(thinkDelay);
-    yield const ToolCall('set_led', {'color': 'yellow', 'pattern': 'blink'});
-    final words = _cueReply(cue).split(' ');
-    for (var i = 0; i < words.length; i++) {
-      await Future<void>.delayed(tokenDelay);
-      yield TextDelta(i == 0 ? words[i] : ' ${words[i]}');
-    }
+    yield const ToolCall('express', {'mood': 'alarm'});
     yield const Done();
-  }
-
-  static String _cueReply(String cue) {
-    final match = RegExp(r"timer[^:]*:\s*'([^']+)'").firstMatch(cue);
-    final label = match?.group(1);
-    if (label != null && label.isNotEmpty) {
-      return 'Time\'s up for $label!';
-    }
-    return 'Time\'s up!';
   }
 
   @override

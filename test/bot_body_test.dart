@@ -1,4 +1,5 @@
 import 'package:cute_bot/companion/brain/transcript.dart';
+import 'package:cute_bot/companion/expressions.dart';
 import 'package:cute_bot/companion/service/bot_body.dart';
 import 'package:cute_bot/companion/service/timer_store.dart';
 import 'package:cute_bot/shared/ble_protocol.dart';
@@ -24,6 +25,40 @@ void main() {
       waitForBattery: () async => battery,
       now: () => DateTime.fromMillisecondsSinceEpoch(1_000_000),
     );
+  });
+
+  test('express(delighted) writes LED + sound + wiggle', () async {
+    final got = await body.invoke('express', {'mood': 'delighted'});
+    expect(got.result['status'], 'ok');
+    expect(got.result['mood'], 'delighted');
+    expect(sent, hasLength(3));
+    expect(sent[0], isA<SetLedCommand>());
+    final led = sent[0] as SetLedCommand;
+    expect((led.red, led.green, led.blue), (255, 105, 180)); // pink
+    expect(led.pattern, LedPattern.blink);
+    expect((sent[1] as PlaySoundCommand).sound, BotSound.chirp);
+    expect(sent[2], isA<WiggleCommand>());
+  });
+
+  test('express(curious) is LED-only (no sound, no wiggle)', () async {
+    await body.invoke('express', {'mood': 'curious'});
+    expect(sent, hasLength(1));
+    expect(sent.single, isA<SetLedCommand>());
+    expect((sent.single as SetLedCommand).pattern, LedPattern.breathe);
+  });
+
+  test('showMood(curious) matches express(curious) actuation', () {
+    body.showMood(BotMood.curious);
+    expect(sent, hasLength(1));
+    final led = sent.single as SetLedCommand;
+    expect((led.red, led.green, led.blue), (0, 200, 255)); // cyan
+    expect(led.pattern, LedPattern.breathe);
+  });
+
+  test('express unknown mood errors and writes nothing', () async {
+    final got = await body.invoke('express', {'mood': 'explode'});
+    expect(got.result['error'], contains('unknown mood'));
+    expect(sent, isEmpty);
   });
 
   test('set_led / wiggle / play_sound write control frames', () async {
