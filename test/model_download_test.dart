@@ -1,89 +1,11 @@
 import 'dart:io';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cute_bot/companion/brain/model_download.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   tearDown(resetExclusiveModelInstallGate);
-
-  group('decideModelDownloadPrep', () {
-    test('no leftovers means enqueue', () {
-      expect(
-        decideModelDownloadPrep(trackedTaskCount: 0, liveTempCount: 0),
-        ModelDownloadPrep.enqueue,
-      );
-    });
-
-    test('one tracked task attaches instead of forking', () {
-      expect(
-        decideModelDownloadPrep(trackedTaskCount: 1, liveTempCount: 0),
-        ModelDownloadPrep.attach,
-      );
-      expect(
-        decideModelDownloadPrep(trackedTaskCount: 1, liveTempCount: 1),
-        ModelDownloadPrep.attach,
-      );
-    });
-
-    test('a live temp with no Dart task must collapse (the device storm)', () {
-      expect(
-        decideModelDownloadPrep(trackedTaskCount: 0, liveTempCount: 1),
-        ModelDownloadPrep.collapseThenEnqueue,
-      );
-    });
-
-    test('two tracked tasks or two temps collapse', () {
-      expect(
-        decideModelDownloadPrep(trackedTaskCount: 2, liveTempCount: 0),
-        ModelDownloadPrep.collapseThenEnqueue,
-      );
-      expect(
-        decideModelDownloadPrep(trackedTaskCount: 0, liveTempCount: 2),
-        ModelDownloadPrep.collapseThenEnqueue,
-      );
-      expect(
-        decideModelDownloadPrep(trackedTaskCount: 2, liveTempCount: 4),
-        ModelDownloadPrep.collapseThenEnqueue,
-      );
-    });
-
-    test('attach without a visible Dart task must collapse', () {
-      expect(
-        refineModelDownloadPrep(
-          prep: ModelDownloadPrep.attach,
-          trackedTaskVisible: false,
-        ),
-        ModelDownloadPrep.collapseThenEnqueue,
-      );
-      expect(
-        refineModelDownloadPrep(
-          prep: ModelDownloadPrep.attach,
-          trackedTaskVisible: true,
-        ),
-        ModelDownloadPrep.attach,
-      );
-      expect(
-        refineModelDownloadPrep(
-          prep: ModelDownloadPrep.enqueue,
-          trackedTaskVisible: false,
-        ),
-        ModelDownloadPrep.enqueue,
-      );
-    });
-  });
-
-  group('isRecoverableModelDownloadCancel', () {
-    test('treats plugin and token cancels as retryable', () {
-      expect(
-        isRecoverableModelDownloadCancel(
-          Exception('DownloadException: Download was canceled.'),
-        ),
-        isTrue,
-      );
-      expect(isRecoverableModelDownloadCancel(Exception('forked download')), isTrue);
-      expect(isRecoverableModelDownloadCancel(Exception('network down')), isFalse);
-    });
-  });
 
   group('holdDownloadPercent', () {
     test('keeps the high-water mark unless the download restarts', () {
@@ -160,31 +82,41 @@ void main() {
     });
   });
 
-  test('waitForModelDownloadIdle retries until temps and tasks are gone',
-      () async {
-    var temps = 2;
-    var tasks = 1;
-    var cancels = 0;
-    var deletes = 0;
-    final idle = await waitForModelDownloadIdle(
-      countTemps: () async => temps,
-      countTasks: () async => tasks,
-      cancelTracked: () async {
-        cancels += 1;
-        tasks = 0;
-      },
-      deleteTemps: () async {
-        deletes += 1;
-        temps = 0;
-        return 1;
-      },
-      attempts: 4,
-      gap: Duration.zero,
-    );
-    expect(idle, isTrue);
-    expect(cancels, 1);
-    expect(deletes, 1);
-    expect(modelDownloadWorkersIdle(trackedTaskCount: 0, liveTempCount: 0), isTrue);
+  group('wifiAllowsDownload', () {
+    test('allows wifi and ethernet, not cellular', () {
+      expect(wifiAllowsDownload([ConnectivityResult.wifi]), isTrue);
+      expect(wifiAllowsDownload([ConnectivityResult.ethernet]), isTrue);
+      expect(
+        wifiAllowsDownload(
+          [ConnectivityResult.mobile, ConnectivityResult.wifi],
+        ),
+        isTrue,
+      );
+      expect(wifiAllowsDownload([ConnectivityResult.mobile]), isFalse);
+      expect(wifiAllowsDownload([ConnectivityResult.none]), isFalse);
+    });
+  });
+
+  group('waitUntilWifi', () {
+    test('returns once isWifi becomes true', () async {
+      var checks = 0;
+      await waitUntilWifi(
+        isWifi: () async => ++checks >= 3,
+        poll: Duration.zero,
+      );
+      expect(checks, 3);
+    });
+
+    test('throws when cancelled before wifi appears', () async {
+      await expectLater(
+        waitUntilWifi(
+          isWifi: () async => false,
+          isCancelled: () => true,
+          poll: Duration.zero,
+        ),
+        throwsA(isA<ChunkedDownloadCancelled>()),
+      );
+    });
   });
 
   test('countDownloadTempsIn sums every scanned dir', () async {
@@ -253,17 +185,16 @@ void main() {
     expect(runs, 1);
   });
 
-  test('collapseLeftoverModelDownloads runs resume then cancel then delete',
+  test('collapseLeftoverModelDownloads cancels then deletes leftover temps',
       () async {
     final log = <String>[];
     await collapseLeftoverModelDownloads(
-      resumeFromBackground: () async => log.add('resume'),
       cancelTracked: () async => log.add('cancel'),
       deleteTemps: () async {
         log.add('delete');
         return 3;
       },
     );
-    expect(log, ['resume', 'cancel', 'delete']);
+    expect(log, ['cancel', 'delete']);
   });
 }

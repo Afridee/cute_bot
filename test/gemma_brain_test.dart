@@ -59,6 +59,30 @@ void main() {
     });
   });
 
+  group('parseWavPcm', () {
+    test('round-trips pcm16ToWav', () {
+      final pcm = Int16List.fromList([0, 1, -1, 32767, -32768]);
+      final parsed = parseWavPcm(pcm16ToWav(pcm, sampleRate: 16000));
+      expect(parsed.sampleRate, 16000);
+      expect(parsed.pcm, pcm);
+    });
+  });
+
+  group('resamplePcm16', () {
+    test('same rate is a copy', () {
+      final pcm = Int16List.fromList([1, 2, 3]);
+      final out = resamplePcm16(pcm, fromRate: 16000, toRate: 16000);
+      expect(out, pcm);
+      expect(identical(out, pcm), isFalse);
+    });
+
+    test('downsamples 32 kHz to 16 kHz at half length', () {
+      final pcm = Int16List.fromList([0, 100, 200, 300, 400, 500, 600, 700]);
+      final out = resamplePcm16(pcm, fromRate: 32000, toRate: 16000);
+      expect(out.length, 4);
+    });
+  });
+
   group('LatencyTrace', () {
     test('summary names the stages a logcat grepping human will look for', () {
       const trace = LatencyTrace(

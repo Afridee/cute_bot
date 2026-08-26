@@ -50,3 +50,124 @@ Uint8List pcm16ToWav(Int16List pcm, {int sampleRate = 16000}) {
   wav.setAll(44, pcmBytes);
   return wav;
 }
+
+/// Parsed PCM WAV (Android TTS `synthesizeToFile` output).
+final class WavPcm {
+  const WavPcm({required this.pcm, required this.sampleRate});
+
+  /// Mono PCM-16. Stereo sources are averaged.
+  final Int16List pcm;
+  final int sampleRate;
+}
+
+/// Reads a PCM WAV (format 1). Walks chunks so a `LIST`/`fact` between
+/// `fmt ` and `data` does not break us. 8-bit unsigned is expanded; 16-bit
+/// little-endian is the common Android TTS case.
+WavPcm parseWavPcm(Uint8List bytes) {
+  if (bytes.length < 44) {
+    throw FormatException('WAV too short (${bytes.length} bytes)');
+  }
+  if (String.fromCharCodes(bytes.sublist(0, 4)) != 'RIFF' ||
+      String.fromCharCodes(bytes.sublist(8, 12)) != 'WAVE') {
+    throw FormatException('not a RIFF/WAVE file');
+  }
+
+  var offset = 12;
+  int? sampleRate;
+  int? channels;
+  int? bitsPerSample;
+  Uint8List? dataBytes;
+
+  while (offset + 8 <= bytes.length) {
+    final id = String.fromCharCodes(bytes.sublist(offset, offset + 4));
+    final size = ByteData.sublistView(bytes, offset + 4, offset + 8)
+        .getUint32(0, Endian.little);
+    final start = offset + 8;
+    final end = start + size;
+    if (end > bytes.length) {
+      throw FormatException('WAV chunk "$id" overruns file');
+    }
+    if (id == 'fmt ') {
+      if (size < 16) {
+        throw FormatException('fmt chunk too small ($size)');
+      }
+      final fmt = ByteData.sublistView(bytes, start, start + size);
+      final format = fmt.getUint16(0, Endian.little);
+      if (format != 1) {
+        throw FormatException('WAV audio format $format is not PCM');
+      }
+      channels = fmt.getUint16(2, Endian.little);
+      sampleRate = fmt.getUint32(4, Endian.little);
+      bitsPerSample = fmt.getUint16(14, Endian.little);
+    } else if (id == 'data') {
+      dataBytes = Uint8List.sublistView(bytes, start, end);
+    }
+    offset = end + (size.isOdd ? 1 : 0); // chunks are word-aligned
+  }
+
+  if (sampleRate == null ||
+      channels == null ||
+      bitsPerSample == null ||
+      dataBytes == null) {
+    throw FormatException('WAV missing fmt or data chunk');
+  }
+  if (channels < 1) {
+    throw FormatException('WAV has no channels');
+  }
+  if (sampleRate < 1000) {
+    throw FormatException('WAV sample rate $sampleRate is unusable');
+  }
+
+  final pcm = _pcm16Mono(dataBytes, channels: channels, bits: bitsPerSample);
+  return WavPcm(pcm: pcm, sampleRate: sampleRate);
+}
+
+Int16List _pcm16Mono(Uint8List data, {required int channels, required int bits}) {
+  if (bits == 16) {
+    final frameCount = data.length ~/ (2 * channels);
+    final out = Int16List(frameCount);
+    final view = ByteData.sublistView(data);
+    for (var i = 0; i < frameCount; i++) {
+      var acc = 0;
+      for (var ch = 0; ch < channels; ch++) {
+        acc += view.getInt16((i * channels + ch) * 2, Endian.little);
+      }
+      out[i] = (acc / channels).round().clamp(-32768, 32767);
+    }
+    return out;
+  }
+  if (bits == 8) {
+    final frameCount = data.length ~/ channels;
+    final out = Int16List(frameCount);
+    for (var i = 0; i < frameCount; i++) {
+      var acc = 0;
+      for (var ch = 0; ch < channels; ch++) {
+        acc += (data[i * channels + ch] - 128) << 8;
+      }
+      out[i] = (acc / channels).round().clamp(-32768, 32767);
+    }
+    return out;
+  }
+  throw FormatException('WAV bits-per-sample $bits is not 8 or 16');
+}
+
+/// Linear-interpolation resample to [toRate]. Same rate is a no-op copy.
+Int16List resamplePcm16(Int16List input,
+    {required int fromRate, required int toRate}) {
+  if (fromRate == toRate) return Int16List.fromList(input);
+  if (fromRate <= 0 || toRate <= 0) {
+    throw ArgumentError('sample rates must be positive');
+  }
+  if (input.isEmpty) return Int16List(0);
+  final outLen = (input.length * toRate / fromRate).round().clamp(1, 1 << 28);
+  final out = Int16List(outLen);
+  final last = input.length - 1;
+  for (var i = 0; i < outLen; i++) {
+    final src = i * fromRate / toRate;
+    final i0 = src.floor().clamp(0, last);
+    final i1 = (i0 + 1).clamp(0, last);
+    final frac = src - i0;
+    out[i] = (input[i0] * (1 - frac) + input[i1] * frac).round();
+  }
+  return out;
+}

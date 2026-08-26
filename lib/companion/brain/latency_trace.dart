@@ -3,9 +3,8 @@
 /// The product budget is end-of-speech → first audio out of the bot speaker
 /// ≤ 2 s warm on E2B (3.5 s ceiling). The clip-based `respond(AudioClip)`
 /// path is fully sequential, so worst-case latency is the *sum* of stages.
-/// TTS + BLE transmit are M5; until then [firstTokenMs] is the on-device
-/// "the bot has something to say" number, and [totalMs] is the full
-/// generate. Both land in logcat and the debug panel every turn.
+/// TTS + BLE transmit are logged by ReplySpeaker (`first audio Xms`).
+/// [firstTokenMs] remains end-of-speech → first token.
 library;
 
 /// One inference turn, split into the stages we can actually measure.

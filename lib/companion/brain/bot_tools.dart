@@ -1,10 +1,9 @@
-/// Tool schemas registered with Gemma 4 (M3).
+/// Tool schemas registered with Gemma 4 (M3/M4).
 ///
 /// Native function calling needs the JSON-schema tools at `createChat` time
-/// so LiteRT-LM can constrain-decode `<|tool_call>` tokens. Full dispatch
-/// through a `BotActuator` is M4; until then the service maps the
-/// [ToolCall] events onto the existing BLE control writes, and the brain
-/// feeds a stub result back so the model can finish the spoken turn.
+/// so LiteRT-LM can constrain-decode `<|tool_call>` tokens. Live dispatch
+/// is `BotBody`; [stubToolResult] is the fallback when no executor is
+/// wired (unit tests).
 library;
 
 import 'package:flutter_gemma/flutter_gemma.dart';
@@ -71,7 +70,7 @@ const List<Tool> kBotTools = [
     name: 'set_timer',
     description:
         'Start a countdown on the phone. The robot will announce when it '
-        'fires. Persistence of pending timers is M4; the call is accepted now.',
+        'fires. Pending timers survive a service restart.',
     parameters: {
       'type': 'object',
       'properties': {
@@ -97,8 +96,7 @@ const List<Tool> kBotTools = [
   ),
 ];
 
-/// Stub tool result fed back into the chat so the model can produce a
-/// spoken follow-up. Real results (battery %, timer id) land in M4.
+/// Fallback tool result when no live executor is wired (tests).
 Map<String, dynamic> stubToolResult(String name, Map<String, dynamic> args) {
   return switch (name) {
     'set_led' => {
@@ -109,14 +107,13 @@ Map<String, dynamic> stubToolResult(String name, Map<String, dynamic> args) {
     'wiggle' => {'status': 'ok'},
     'play_sound' => {'status': 'ok', 'name': args['name']},
     'set_timer' => {
-        'status': 'accepted',
+        'status': 'ok',
         'minutes': args['minutes'],
         'label': args['label'],
-        'note': 'timer persistence lands in M4',
       },
     'get_battery' => {
         'status': 'unknown',
-        'note': 'battery telemetry is not wired into the brain yet (M4)',
+        'percent': null,
       },
     _ => {'error': 'unknown tool $name'},
   };

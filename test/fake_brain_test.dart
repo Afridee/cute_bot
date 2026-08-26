@@ -83,4 +83,15 @@ void main() {
     final events = await brain.respond(_clip(), _emptyCtx()).toList();
     expect(events.single, isA<BrainError>());
   });
+
+  test('respondToCue announces the timer label', () async {
+    final brain = _instantBrain();
+    await brain.warmUp();
+    final events = await brain
+        .respondToCue("A timer just finished: 'tea'. Tell the human.", _emptyCtx())
+        .toList();
+    final text = events.whereType<TextDelta>().map((e) => e.text).join();
+    expect(text, contains('tea'));
+    expect(events.last, isA<Done>());
+  });
 }

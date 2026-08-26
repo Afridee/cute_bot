@@ -96,6 +96,33 @@ final class FakeBrain implements BotBrain {
   }
 
   @override
+  Stream<BrainEvent> respondToCue(String cue, ConversationContext ctx) async* {
+    if (_disposed || !_warm) {
+      yield BrainError(_disposed
+          ? 'brain used after dispose'
+          : 'respond() before warmUp() completed');
+      return;
+    }
+    await Future<void>.delayed(thinkDelay);
+    yield const ToolCall('set_led', {'color': 'yellow', 'pattern': 'blink'});
+    final words = _cueReply(cue).split(' ');
+    for (var i = 0; i < words.length; i++) {
+      await Future<void>.delayed(tokenDelay);
+      yield TextDelta(i == 0 ? words[i] : ' ${words[i]}');
+    }
+    yield const Done();
+  }
+
+  static String _cueReply(String cue) {
+    final match = RegExp(r"timer[^:]*:\s*'([^']+)'").firstMatch(cue);
+    final label = match?.group(1);
+    if (label != null && label.isNotEmpty) {
+      return 'Time\'s up for $label!';
+    }
+    return 'Time\'s up!';
+  }
+
+  @override
   Future<void> dispose() async {
     _disposed = true;
     _warm = false;

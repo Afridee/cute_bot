@@ -29,9 +29,14 @@ import '../brain/brain_session.dart';
 import '../brain/fake_brain.dart';
 import '../brain/gemma_brain.dart';
 import '../brain/transcript.dart';
+import '../voice/flutter_tts_voice.dart';
+import '../voice/speech_out.dart';
+import '../voice/voice.dart';
+import 'bot_body.dart';
 import 'notification_text.dart';
 import 'service_ipc.dart';
 import 'task_storage.dart';
+import 'timer_store.dart';
 
 const String _tag = 'BotService';
 
@@ -47,6 +52,12 @@ final class BotTaskHandler extends TaskHandler {
   BrainSession? _session;
   TranscriptStore? _transcript;
   GemmaBrain? _gemma;
+  BotBody? _body;
+  TimerStore? _timerStore;
+  ReplySpeaker? _speaker;
+  Voice? _voice;
+  final Map<String, Timer> _dartTimers = {};
+  Completer<({int percent, int millivolts, bool charging})>? _batteryWaiter;
   late UtteranceReassembler _reassembler;
   bool _bringUp = false;
   final List<StreamSubscription> _subscriptions = [];
@@ -73,6 +84,7 @@ final class BotTaskHandler extends TaskHandler {
   BotState _botState = BotState.idle;
   int? _batteryPercent;
   int? _batteryMillivolts;
+  bool _batteryCharging = false;
 
   // Phone alerts (events injected by the native notification listener).
   // Default ON: the events only flow once the user grants Notification
@@ -98,6 +110,7 @@ final class BotTaskHandler extends TaskHandler {
 
   BrainSessionState? _lastExpressedBrainState;
   BrainSessionState? _lastCaptionBrainState;
+  BrainSessionState? _lastSpeakerBrainState;
   DateTime _lastCaptionAt = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _pendingCaption;
   static const Duration _minCaptionGap = Duration(milliseconds: 200);
@@ -134,6 +147,15 @@ final class BotTaskHandler extends TaskHandler {
     _logActivity('Service started (${starter.name})');
 
     _transcript = TranscriptStore(const TaskKeyValueStore());
+    _timerStore = TimerStore(const TaskKeyValueStore());
+    await _timerStore!.load();
+    _body = BotBody(
+      timers: _timerStore!,
+      sendControl: _sendControl,
+      nextSequence: () => _controlSeq.next(),
+      waitForBattery: _waitForBattery,
+    );
+
     // CUTEBOT_FAKE_BRAIN=true keeps M2's canned brain for one-phone tests
     // that must not download 2.6 GB. Default is Gemma 4 E2B.
     const useFake = bool.fromEnvironment('CUTEBOT_FAKE_BRAIN');
@@ -142,14 +164,25 @@ final class BotTaskHandler extends TaskHandler {
       Log.i(_tag, 'brain: FakeBrain (CUTEBOT_FAKE_BRAIN)');
       brain = FakeBrain();
     } else {
-      _gemma = GemmaBrain(onChanged: () => _pushSnapshot());
+      _gemma = GemmaBrain(
+        onChanged: () => _pushSnapshot(),
+        executeTool: _executeTool,
+      );
       brain = _gemma!;
       Log.i(_tag, 'brain: Gemma 4 E2B');
     }
     _session = BrainSession(
       brain: brain,
       transcript: _transcript!,
-      onToolCall: _onToolCall,
+      onToolCall: (call) {
+        _logActivity('Tool call: $call');
+        // FakeBrain has no executor inside respond(); GemmaBrain already
+        // awaited _executeTool before yielding the ToolCall.
+        if (useFake) {
+          unawaited(_executeTool(
+              call.name, Map<String, dynamic>.from(call.arguments)));
+        }
+      },
     )..addListener(_onBrainChanged);
 
     _reassembler = UtteranceReassembler(
@@ -183,9 +216,37 @@ final class BotTaskHandler extends TaskHandler {
     }
 
     await _link!.start();
-    // Warm-up runs while the link connects; both report through snapshots.
-    unawaited(_session!.start());
+    unawaited(_bringUpVoice(useFake: useFake));
+    // Warm-up runs while the link connects; restore timers after the brain
+    // is ready so a due timer enters the conversation queue, not a drop.
+    unawaited(() async {
+      await _session!.start();
+      _restoreTimers();
+    }());
     _pushSnapshot(force: true);
+  }
+
+  Future<void> _bringUpVoice({required bool useFake}) async {
+    try {
+      final voice = useFake ? FakeVoice() : FlutterTtsVoice();
+      await voice.warmUp();
+      _voice = voice;
+      _speaker = ReplySpeaker(
+        voice: voice,
+        sendFrame: (frame) {
+          final link = _link;
+          if (link == null || link.state != BotLinkState.ready) return;
+          link.sendAudioFrame(frame);
+        },
+        mtu: () => _link?.mtu ?? 23,
+        queuedFrames: () => _link?.queuedAudioFrames ?? 0,
+        onSpeakingChanged: _onBotSpeaking,
+      );
+      Log.i(_tag, 'voice ready (${useFake ? 'FakeVoice' : 'FlutterTtsVoice'})');
+    } catch (e, stack) {
+      Log.e(_tag, 'TTS warm-up failed; captions only', e, stack);
+      _logActivity('TTS unavailable: $e');
+    }
   }
 
   @override
@@ -206,6 +267,11 @@ final class BotTaskHandler extends TaskHandler {
     _pendingCaption?.cancel();
     _phoneAlertRestore?.cancel();
     _utteranceIdle?.cancel();
+    for (final t in _dartTimers.values) {
+      t.cancel();
+    }
+    _dartTimers.clear();
+    _batteryWaiter = null;
     for (final sub in _subscriptions) {
       unawaited(sub.cancel());
     }
@@ -213,6 +279,11 @@ final class BotTaskHandler extends TaskHandler {
     _session?.dispose();
     _session = null;
     _gemma = null;
+    _body = null;
+    _timerStore = null;
+    unawaited(_voice?.dispose());
+    _voice = null;
+    _speaker = null;
     _link?.dispose();
     _link = null;
     _bringUp = false;
@@ -290,6 +361,9 @@ final class BotTaskHandler extends TaskHandler {
   void _onAudioFrame(AudioChunkMessage message) {
     final now = DateTime.now();
     _markInbound(now);
+    // Half-duplex: drop bot-mic frames while we are talking so the model
+    // does not hear its own TTS (the two-phone AEC masks this; ESP32 will not).
+    if (_speaker?.speaking == true) return;
     final started = message.isUtteranceStart || !_receivingUtterance;
     if (started) {
       _utteranceFirstArrival = now;
@@ -356,9 +430,19 @@ final class BotTaskHandler extends TaskHandler {
   void _onTelemetry(BotMessage message) {
     _markInbound(DateTime.now());
     switch (message) {
-      case BatteryStatusMessage(:final percent, :final millivolts):
+      case BatteryStatusMessage(:final percent, :final millivolts, :final charging):
         _batteryPercent = percent;
         _batteryMillivolts = millivolts;
+        _batteryCharging = charging;
+        final waiter = _batteryWaiter;
+        _batteryWaiter = null;
+        if (waiter != null && !waiter.isCompleted) {
+          waiter.complete((
+            percent: percent,
+            millivolts: millivolts,
+            charging: charging,
+          ));
+        }
         _logActivity('Battery $percent% ($millivolts mV)');
       case BotStateMessage(:final state):
         _botState = state;
@@ -381,7 +465,39 @@ final class BotTaskHandler extends TaskHandler {
       _expressBrainState(session.state, hadError: session.lastError != null);
     }
     _pushCaption(session);
+    _pushSpeech(session);
     _updateNotification();
+    _pushSnapshot();
+  }
+
+  void _pushSpeech(BrainSession session) {
+    final speaker = _speaker;
+    if (speaker == null) return;
+    final prev = _lastSpeakerBrainState;
+    if (session.state == BrainSessionState.thinking &&
+        prev != BrainSessionState.thinking &&
+        prev != BrainSessionState.responding) {
+      unawaited(speaker.beginTurn());
+    }
+    if (session.state == BrainSessionState.responding &&
+        session.responseText.isNotEmpty) {
+      unawaited(speaker.update(session.responseText, isFinal: false));
+    }
+    if (prev == BrainSessionState.responding &&
+        session.state == BrainSessionState.ready &&
+        session.lastResponseText.isNotEmpty) {
+      unawaited(speaker.update(session.lastResponseText, isFinal: true));
+    }
+    _lastSpeakerBrainState = session.state;
+  }
+
+  void _onBotSpeaking(bool speaking) {
+    if (speaking) {
+      _reassembler.reset();
+      _receivingUtterance = false;
+      _utteranceIdle?.cancel();
+      _session?.cancelListening();
+    }
     _pushSnapshot();
   }
 
@@ -482,67 +598,76 @@ final class BotTaskHandler extends TaskHandler {
     }
   }
 
-  /// Tool calls from the brain, mapped onto BLE control writes. Full tool
-  /// dispatch (BotActuator) is M4; this covers the body-language tools so
-  /// Gemma's `set_led` / `wiggle` / `play_sound` are visible on the bot.
-  void _onToolCall(ToolCall call) {
-    _logActivity('Tool call: $call');
-    switch (call.name) {
-      case 'set_led':
-        final rgb = _ledColor(call.arguments['color']);
-        _sendControl(
-            SetLedCommand(
-              sequence: _controlSeq.next(),
-              red: rgb.$1,
-              green: rgb.$2,
-              blue: rgb.$3,
-              pattern: _ledPattern(call.arguments['pattern']),
-            ),
-            'tool set_led');
-      case 'wiggle':
-        _sendControl(WiggleCommand(sequence: _controlSeq.next()), 'tool wiggle');
-      case 'play_sound':
-        _sendControl(
-            PlaySoundCommand(
-                sequence: _controlSeq.next(),
-                sound: _botSound(call.arguments['name'])),
-            'tool play_sound');
-      case 'get_battery':
-        _sendControl(
-            GetBatteryCommand(sequence: _controlSeq.next()), 'tool get_battery');
-      case 'set_timer':
-        Log.i(_tag, 'set_timer stubbed until M4: $call');
-      default:
-        Log.w(_tag, 'unhandled tool call: $call');
+  /// Tool calls from the brain, mapped onto BLE / timers / battery.
+  Future<Map<String, dynamic>> _executeTool(
+      String name, Map<String, dynamic> args) async {
+    final body = _body;
+    if (body == null) {
+      return {'error': 'bot body not ready'};
+    }
+    try {
+      final invoked = await body.invoke(name, args);
+      if (invoked.armed != null) _armTimer(invoked.armed!);
+      return invoked.result;
+    } catch (e, stack) {
+      Log.e(_tag, 'tool $name failed', e, stack);
+      return {'error': '$e'};
     }
   }
 
-  static (int, int, int) _ledColor(Object? name) => switch ('$name') {
-        'red' => (255, 0, 0),
-        'green' => (0, 255, 0),
-        'blue' => (0, 60, 255),
-        'pink' => (255, 105, 180),
-        'purple' => (160, 0, 255),
-        'yellow' => (255, 200, 0),
-        'orange' => (255, 120, 0),
-        'white' => (255, 255, 255),
-        'cyan' => (0, 200, 255),
-        'off' => (0, 0, 0),
-        _ => (255, 105, 180),
-      };
+  void _restoreTimers() {
+    final store = _timerStore;
+    if (store == null) return;
+    for (final timer in store.pending) {
+      _armTimer(timer);
+    }
+    if (store.pending.isNotEmpty) {
+      Log.i(_tag, 'restored ${store.pending.length} timer(s)');
+    }
+  }
 
-  static LedPattern _ledPattern(Object? name) => switch ('$name') {
-        'blink' => LedPattern.blink,
-        'breathe' => LedPattern.breathe,
-        'off' => LedPattern.off,
-        _ => LedPattern.solid,
-      };
+  void _armTimer(PendingTimer timer) {
+    _dartTimers[timer.id]?.cancel();
+    final delay = timer.remainingAt(DateTime.now());
+    if (delay == Duration.zero) {
+      unawaited(_fireTimer(timer));
+      return;
+    }
+    _dartTimers[timer.id] = Timer(delay, () => unawaited(_fireTimer(timer)));
+  }
 
-  static BotSound _botSound(Object? name) => switch ('$name') {
-        'beep' => BotSound.beep,
-        'purr' => BotSound.purr,
-        _ => BotSound.chirp,
-      };
+  Future<void> _fireTimer(PendingTimer timer) async {
+    _dartTimers.remove(timer.id)?.cancel();
+    await _timerStore?.remove(timer.id);
+    _logActivity('Timer fired: ${timer.label}');
+    Log.i(_tag, 'timer ${timer.id} fired (${timer.label})');
+    await _session?.handleCue(
+      "A timer just finished: '${timer.label}'. "
+      'Tell the human in one short spoken sentence. Call a tool if it fits.',
+    );
+  }
+
+  static const Duration _batteryWait = Duration(seconds: 2);
+
+  Future<({int percent, int millivolts, bool charging})?> _waitForBattery() async {
+    final waiter =
+        Completer<({int percent, int millivolts, bool charging})>();
+    _batteryWaiter = waiter;
+    try {
+      return await waiter.future.timeout(_batteryWait);
+    } on TimeoutException {
+      if (_batteryPercent != null) {
+        return (
+          percent: _batteryPercent!,
+          millivolts: _batteryMillivolts ?? 0,
+          charging: _batteryCharging,
+        );
+      }
+      return null;
+    } finally {
+      if (identical(_batteryWaiter, waiter)) _batteryWaiter = null;
+    }
+  }
 
   // --- phone alerts (notification listener -> bot) ---
 

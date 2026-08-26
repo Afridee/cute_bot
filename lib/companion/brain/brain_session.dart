@@ -51,8 +51,10 @@ final class BrainSession extends ChangeNotifier {
   final BotBrain _brain;
   final TranscriptStore _transcript;
 
-  /// Structured tool calls surface here; the service maps them onto the
-  /// bot's body (BLE control writes). Full dispatch is M4.
+  /// Structured tool calls surface here so FakeBrain (which has no live
+  /// executor) can still move the bot. GemmaBrain dispatches inside the
+  /// generate loop via its executeTool callback so the model gets a real
+  /// tool result before it speaks.
   final void Function(ToolCall call)? onToolCall;
 
   BrainSessionState state = BrainSessionState.cold;
@@ -142,6 +144,22 @@ final class BrainSession extends ChangeNotifier {
     return turn;
   }
 
+  /// Queues a non-audio cue (timer fire) on the same conversation queue
+  /// as spoken turns. Never races the chat.
+  Future<void> handleCue(String cue) {
+    if (_disposed) return Future.value();
+    if (state == BrainSessionState.cold ||
+        state == BrainSessionState.warming) {
+      droppedUtterances += 1;
+      Log.w(_tag, 'dropping cue: brain ${state.name}');
+      notifyListeners();
+      return Future.value();
+    }
+    final turn = _queue.then((_) => _runCue(cue));
+    _queue = turn.catchError((_) {});
+    return turn;
+  }
+
   Future<void> _runTurn(AudioClip clip) async {
     if (_disposed) return;
 
@@ -182,6 +200,62 @@ final class BrainSession extends ChangeNotifier {
     } catch (e, stack) {
       lastError = 'respond failed: $e';
       Log.e(_tag, 'respond stream failed', e, stack);
+    } finally {
+      if (completed && responseText.isNotEmpty && !_disposed) {
+        lastResponseText = responseText;
+        await _transcript.append(TranscriptEntry(
+          role: TranscriptRole.bot,
+          text: responseText,
+        ));
+      }
+      responseText = '';
+      _turnInFlight = false;
+      if (!_disposed) {
+        state = BrainSessionState.ready;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> _runCue(String cue) async {
+    if (_disposed) return;
+
+    _turnInFlight = true;
+    state = BrainSessionState.thinking;
+    responseText = '';
+    notifyListeners();
+
+    await _transcript.append(TranscriptEntry(
+      role: TranscriptRole.system,
+      text: '(timer fired)',
+    ));
+
+    final ctx = ConversationContext(transcript: _transcript.entries);
+    var completed = false;
+
+    try {
+      await for (final event in _brain.respondToCue(cue, ctx)) {
+        if (_disposed) return;
+        switch (event) {
+          case TextDelta(:final text):
+            if (state != BrainSessionState.responding) {
+              state = BrainSessionState.responding;
+            }
+            responseText += text;
+            notifyListeners();
+          case ToolCall():
+            Log.i(_tag, 'tool call: $event');
+            onToolCall?.call(event);
+          case Done():
+            completed = true;
+          case BrainError(:final message):
+            lastError = message;
+            Log.e(_tag, 'brain error: $message');
+        }
+      }
+    } catch (e, stack) {
+      lastError = 'cue failed: $e';
+      Log.e(_tag, 'cue stream failed', e, stack);
     } finally {
       if (completed && responseText.isNotEmpty && !_disposed) {
         lastResponseText = responseText;

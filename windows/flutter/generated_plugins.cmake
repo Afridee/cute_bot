@@ -4,7 +4,9 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   bluetooth_low_energy_windows
+  connectivity_plus
   flutter_gemma
+  flutter_tts
   record_windows
 )
 

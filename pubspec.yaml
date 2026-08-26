@@ -57,10 +57,16 @@ dependencies:
   # on this line.
   flutter_gemma: 1.6.3
   flutter_gemma_litertlm: 1.5.2
-  # Used to cancel leftover WorkManager model pulls before a new install.
+  # One-time cancel of leftover flutter_gemma SmartDownloader workers.
   background_downloader: 9.5.8
   path_provider: 2.1.6
   path: 1.9.1
+  # Wi-Fi gate before the 2.6 GB model pull (service isolate).
+  connectivity_plus: 6.1.5
+
+  # M5: TTS to a WAV file (not the phone speaker), then we resample/ADPCM
+  # and ship PCM over BLE. Named in the brief.
+  flutter_tts: 4.2.5
 
 dev_dependencies:
   flutter_test:

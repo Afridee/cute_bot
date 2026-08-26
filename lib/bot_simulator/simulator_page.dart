@@ -163,8 +163,8 @@ class _ConversationGroup extends StatelessWidget {
       children: [
         if (lines.isEmpty)
           Text(
-            'Hold to talk, then wait for a reply. Captions come over BLE '
-            'until TTS (M5) speaks them.',
+            'Hold to talk, then wait for a reply. Captions still stream '
+            'over BLE; spoken audio is TTS from the companion.',
             style: nd.typography.body.copyWith(color: nd.colors.textDisabled),
           )
         else

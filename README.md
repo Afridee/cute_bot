@@ -4,17 +4,18 @@ Flutter companion app for a small desk robot (mic + speaker + BLE; ESP32 later).
 All intelligence runs on the phone, fully offline. The bot is ears, a mouth,
 and a face.
 
-**Milestone status: M3 (LLM / GemmaBrain) complete (agent bar).
-Awaiting the M3 human-bar tests on a real 8GB+ phone — first-launch
-model download, a spoken utterance through Gemma 4 native audio,
-latency breakdown (submit / ttf / decode), and tool-call LEDs. See
-`Docs/m3-testing-guide.md`. M2.5 keep-alive tests remain in
+**Milestone status: M4 (timers / battery-into-the-brain) and M5
+(TTS over BLE + persona) complete (agent bar). Human-bar: a spoken
+reply must come out of the simulator speaker, `set_timer` must
+survive a service kill, and `get_battery` must come back as a real
+percent. See `Docs/m4-testing-guide.md`. M3 native-audio checks remain
+in `Docs/m3-testing-guide.md`; M2.5 keep-alive in
 `Docs/m2.5-testing-guide.md`.**
 
 Milestone numbering follows `cursor-prompt-bot-companion.md` for M0–M2 and
-M3+. **M2.5** is background survivability (CDM, watchdog, notification
-listener, OEM care). **M3** is the LLM layer (`GemmaBrain`). **M4** is
-tools-as-the-bot's-body (full `BotActuator` + timer persistence).
+M3+. **M2.5** is background survivability. **M3** is the LLM layer.
+**M4** is tools (`BotBody`, timer persistence, battery telemetry into
+Gemma). **M5** is TTS to the bot speaker plus `persona.dart`.
 
 ## Layout
 
@@ -26,8 +27,10 @@ tools-as-the-bot's-body (full `BotActuator` + timer persistence).
 | `lib/shared/log.dart` | Single logging channel with levels. `adb logcat | grep CuteBot`. |
 | `lib/bot_simulator/` | Peripheral (GATT server) mode: a second Android phone standing in for the ESP32. |
 | `lib/companion/` | Central mode — the actual app. `bot_link.dart` (scan / auto-connect / MTU 517 / reconnect backoff / prioritized writes); since M2 the UI is a thin client over the foreground service. |
-| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the `BotBrain` interface), `fake_brain.dart` (canned stand-in), `gemma_brain.dart` (M3: Gemma 4 E2B, native audio + function calling), `brain_session.dart` (serialized conversation queue + recovery), `transcript.dart` (durable transcript), `pcm16.dart` / `latency_trace.dart` / `bot_tools.dart` (pure helpers). |
-| `lib/companion/service/` | M2 foreground service: `bot_service.dart` (the service isolate that owns BotLink + the brain + phone-alert actuation), `service_ipc.dart` (UI↔service message schema, including `phoneAlert`), `task_storage.dart` (persistence backend), `notification_text.dart` (pure notification formatter, unit-tested). |
+| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the `BotBrain` interface, including `respondToCue` for timer fires), `fake_brain.dart`, `gemma_brain.dart`, `brain_session.dart` (serialized conversation queue), `transcript.dart`, `pcm16.dart` / `latency_trace.dart` / `bot_tools.dart`. |
+| `lib/companion/persona.dart` | M5: system prompt + few-shots. The only place personality lives. |
+| `lib/companion/voice/` | M5: `Voice` interface, `FlutterTtsVoice` (`synthesizeToFile` → WAV → 16 kHz PCM), `FakeVoice`, sentence splitter, `ReplySpeaker` (sentence-by-sentence ADPCM over BLE). |
+| `lib/companion/service/` | Foreground service plus `bot_body.dart` (tool dispatch), `timer_store.dart` (pending timers on the same KV store as the transcript), `service_ipc.dart`, `task_storage.dart`, `notification_text.dart`. |
 | `lib/companion/companion_device_link.dart` | M2.5: Dart wrapper over the CDM MethodChannel — associate / disassociate / state for the "Android link" card. |
 | `lib/companion/oem_care.dart` | M2.5: Dart face of OEM diagnostics — manufacturer/brand, sticky "service died behind our back" marker, Notification-access grant. |
 | `lib/companion/oem_guidance_page.dart` | M2.5: one-shot "Keep the bot alive" page for vivo/iQOO (Notification access first, then Recents lock / autostart / background power). Auto-shown after an unexpected death; always reachable via **Keep-alive tips**. |
@@ -68,6 +71,9 @@ tools-as-the-bot's-body (full `BotActuator` + timer persistence).
   native audio (`Message.withAudio`), and native function calling
   (`createChat` + `FunctionCallResponse`) are on this line. Initialize with
   `LiteRtLmEngine()` in the **service isolate**, not the UI isolate.
+- `flutter_tts` 4.2.5 — M5. Named in the brief. `synthesizeToFile` (not
+  `speak`) so PCM can be resampled to 16 kHz, ADPCM-encoded, and written
+  to the bot speaker. The phone speaker stays silent.
 
 ## Protocol summary (v1)
 
@@ -166,13 +172,35 @@ miniaudio decoder needs a container, not raw samples), and go in as
 re-seeds a short text tail of recent bot replies; old audio clips are
 not kept in the 4096-token window. Function calls come back as
 structured `FunctionCallResponse` (Gemma 4 native `<|tool_call>` tokens,
-`ModelType.gemma4`); they surface as `ToolCall` events and a stub result
-is fed back so the model can finish the spoken turn. Full `BotActuator`
-dispatch, timer persistence, and battery-into-the-brain are M4. Each turn
-logs a latency breakdown (`submit` / `ttf` / `decode` / `total`); **ttf**
-is the M3 proxy for the 2 s E2B budget — TTS + BLE playback are M5 and
-are not in that number yet. `Docs/m3-testing-guide.md` walks the on-phone
-test.
+`ModelType.gemma4`). Live results come from `BotBody` (LED / wiggle /
+sound / timer / battery) and are fed back via `Message.toolResponse`
+before the spoken follow-up. Each turn logs `submit` / `ttf` / `decode`
+/ `total`; **ttf** is still end-of-speech → first token. First audio
+out of the bot speaker is `ReplySpeaker: first audio Xms` in logcat
+(M5). `Docs/m3-testing-guide.md` walks the on-phone model test.
+
+## M4 in one paragraph
+
+Tool dispatch lives in `BotBody`. `set_led` / `wiggle` / `play_sound`
+are BLE control writes (the simulator already shows them). `get_battery`
+writes the command, waits up to 2 s for telemetry, and returns
+percent / mV to the model. `set_timer` persists on the same KV store as
+the transcript (survives kill → restart) and arms a Dart timer; when it
+fires, the announcement enters `BrainSession.handleCue` on the **same**
+serialized conversation queue as spoken turns — never a second LiteRT
+session. Due timers restore after brain warm-up.
+
+## M5 in one paragraph
+
+`persona.dart` is the system prompt + few-shots. Replies stream as
+`TextDelta`s; `ReplySpeaker` synthesizes completed sentences through
+`flutter_tts.synthesizeToFile`, parses the WAV, resamples to 16 kHz,
+and ships one BLE utterance (start → frames → end) on audio-to-bot.
+The simulator already sets `BotState.speaking` on that start flag and
+mutes by not capturing; the companion also drops inbound mic frames
+while TTS is in flight (half-duplex). Captions still go to the
+simulator screen as a subtitle. `Docs/m4-testing-guide.md` walks the
+two-phone TTS / timer / battery test.
 
 ## Running the M0 human-bar test
 
@@ -202,8 +230,9 @@ test.
   negotiated MTU. Fine for the companion (it negotiates 517); nRF Connect
   users must request a bigger MTU manually.
 - Echo: the two-phone simulator has hardware AEC, the real bot will not.
-  Half-duplex is the planned v1 answer; `BotState.speaking` exists in the
-  protocol for exactly that.
+  v1 half-duplex: companion drops inbound mic while `ReplySpeaker` is
+  sending, and the simulator sets `BotState.speaking` on audio-to-bot
+  start (so firmware can mute the mic the same way).
 - Simulator battery telemetry is faked (87%, 3970 mV).
 - **Boot restart (M2):** `autoRunOnBoot` uses a BOOT_COMPLETED receiver.
   `connectedDevice` services are allowed to start from BOOT_COMPLETED on
@@ -258,9 +287,12 @@ test.
   → `createSession`. LiteRT-LM's `FfiInferenceModel.createChat` still
   forwards `tools` (the base `InferenceModel.createChat` in flutter_gemma
   1.6.3 does not). Flagged in `gemma_brain.dart`.
-- **Latency budget (M3):** ttf (end of speech → first token) is measured;
-  first audio out of the bot speaker is not, because TTS is M5. Report the
-  ttf number from the human bar before judging the 2 s / 3.5 s ceiling.
+- **Latency budget:** ttf (end of speech → first token) is still the
+  M3 number. M5 adds `ReplySpeaker: first audio Xms` (turn start →
+  first BLE audio frame). The product budget is end-of-speech → first
+  audio out of the bot speaker ≤ 2 s on E2B (3.5 s ceiling) — that is
+  ttf + TTS synth of the first sentence + first BLE write. Report both
+  numbers from the human bar.
 - **minSdk 30 / Flutter 3.44.9:** hard requirements of `libLiteRtLm` and
   `flutter_gemma` 1.0+. Android 10 phones and the old 3.41.7 pin cannot
   run M3.

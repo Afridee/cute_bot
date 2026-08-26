@@ -8,7 +8,7 @@
 ///
 /// Storage sits behind [KeyValueStore] so this whole path unit-tests in
 /// memory; the service plugs in flutter_foreground_task's store (backed by
-/// SharedPreferences). Pending timers (M4) will reuse the same interface.
+/// SharedPreferences). Pending timers (M4) reuse the same interface.
 library;
 
 import 'dart:convert';

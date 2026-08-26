@@ -45,6 +45,10 @@ final class _GatedBrain implements BotBrain {
   }
 
   @override
+  Stream<BrainEvent> respondToCue(String cue, ConversationContext ctx) =>
+      respond(AudioClip(pcm: Int16List(0)), ctx);
+
+  @override
   Future<void> dispose() async {}
 }
 
@@ -199,5 +203,32 @@ void main() {
     // No bot entry was persisted for the failed turn (only the user line).
     expect(session.transcript.where((e) => e.role == TranscriptRole.bot),
         isEmpty);
+  });
+
+  test('handleCue serializes behind a spoken turn and persists the reply',
+      () async {
+    final brain = _GatedBrain();
+    final session = BrainSession(
+      brain: brain,
+      transcript: TranscriptStore(InMemoryKeyValueStore()),
+    );
+    await session.start();
+
+    final spoken = session.handleUtterance(_clip());
+    final cue = session.handleCue("A timer just finished: 'tea'.");
+    await Future<void>.delayed(Duration.zero);
+    expect(brain.gates, hasLength(1));
+
+    brain.gates[0].complete();
+    await spoken;
+    await Future<void>.delayed(Duration.zero);
+    expect(brain.gates, hasLength(2));
+    brain.gates[1].complete();
+    await cue;
+
+    expect(brain.maxConcurrentTurns, 1);
+    expect(session.transcript.where((e) => e.role == TranscriptRole.system),
+        isNotEmpty);
+    expect(session.lastResponseText, 'ok');
   });
 }

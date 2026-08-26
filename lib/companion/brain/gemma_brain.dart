@@ -9,10 +9,14 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_gemma/flutter_gemma.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../../shared/log.dart';
+import '../persona.dart';
 import 'bot_brain.dart';
 import 'bot_tools.dart';
 import 'context_window.dart';
@@ -30,20 +34,17 @@ const String _tag = 'GemmaBrain';
 const int kGemmaMaxTokens = 4096;
 
 /// Cap on generated tokens. A desk robot that monologues is not cute, and
-/// decode time is on the latency budget. M5 will tune this with the persona.
-const int kGemmaMaxOutputTokens = 80;
+/// decode time is on the latency budget. Kept in lockstep with the persona.
+const int kGemmaMaxOutputTokens = kPersonaMaxOutputTokens;
 
-/// Temporary system prompt. M5 moves this to `lib/companion/persona.dart`.
-const String kGemmaSystemInstruction =
-    'You are a tiny desk robot. You hear the user through your microphone. '
-    'Reply in one or two short spoken sentences — no markdown, no lists, '
-    'no stage directions. When a feeling fits, call a tool to show it on '
-    'your LEDs or body, then say the words.';
+typedef ToolExecutor = Future<Map<String, dynamic>> Function(
+    String name, Map<String, dynamic> args);
 
 final class GemmaBrain implements BotBrain {
   GemmaBrain({
     String? modelUrl,
     this.onChanged,
+    this.executeTool,
   }) : modelUrl = modelUrl ?? gemmaModelUrlFromEnvironment();
 
   final String modelUrl;
@@ -52,6 +53,10 @@ final class GemmaBrain implements BotBrain {
   /// service uses this to push a snapshot; BrainSession already notifies
   /// per token.
   final void Function()? onChanged;
+
+  /// Live tool dispatch (M4). When null, [stubToolResult] is fed back so
+  /// unit tests don't need a bot.
+  final ToolExecutor? executeTool;
 
   InferenceModel? _model;
   InferenceChat? _chat;
@@ -76,7 +81,6 @@ final class GemmaBrain implements BotBrain {
   int? _warmChatMs;
 
   Future<void>? _warmUpInFlight;
-  CancelToken? _installCancel;
 
   String get kind => 'Gemma 4 E2B';
 
@@ -96,25 +100,18 @@ final class GemmaBrain implements BotBrain {
     Log.i(_tag, 'installing $modelUrl');
     try {
       await runExclusiveModelInstall(() async {
-        // Kill leftover WorkManager pulls of this file before enqueueing
-        // one more. Same-path leftovers share a task id and fight at 1–3%.
+        // Upgrade cleanup only: stop leftover SmartDownloader workers
+        // from older builds. New installs do not enqueue that group.
         await collapseLeftoverModelDownloads();
         if (_disposed) {
           throw StateError('GemmaBrain used after dispose');
         }
-        try {
-          await _installModelFile();
-        } catch (e) {
-          if (_disposed || !isRecoverableModelDownloadCancel(e)) rethrow;
-          Log.w(_tag, 'install cancelled ($e), settling and retrying once');
-          await collapseLeftoverModelDownloads();
-          await Future<void>.delayed(kCollapseSettle);
-          if (_disposed) {
-            throw StateError('GemmaBrain used after dispose');
-          }
-          await _installModelFile();
-        }
+        await _installModelFile();
       });
+    } on ChunkedDownloadCancelled {
+      _clearDownloadProgress();
+      onChanged?.call();
+      throw StateError('GemmaBrain used after dispose');
     } catch (e) {
       _clearDownloadProgress();
       onChanged?.call();
@@ -144,66 +141,45 @@ final class GemmaBrain implements BotBrain {
   }
 
   Future<void> _installModelFile() async {
-    _installCancel = CancelToken();
-    var checkingFork = false;
-    var forkHits = 0;
-    // First tick is 8s in; cancel only after two consecutive forks so a
-    // leftover temp being deleted cannot kill a healthy 0% enqueue.
-    final forkWatch = Timer.periodic(const Duration(seconds: 8), (_) {
-      if (checkingFork) return;
-      checkingFork = true;
-      () async {
-        try {
-          final n = await countLiveModelDownloadTemps();
-          if (n > 1) {
-            forkHits += 1;
-            if (forkHits >= 2 && !(_installCancel?.isCancelled ?? true)) {
-              Log.w(_tag, 'download forked ($n temps)');
-              _installCancel?.cancel('forked download');
-            }
-          } else {
-            forkHits = 0;
-          }
-        } catch (e) {
-          Log.w(_tag, 'fork check failed: $e');
-        } finally {
-          checkingFork = false;
-        }
-      }();
-    });
-    try {
-      await FlutterGemma.installModel(
-        modelType: ModelType.gemma4,
-        fileType: ModelFileType.litertlm,
-      )
-          .fromNetwork(
-            modelUrl,
-            token: downloadTokenForModelUrl(modelUrl),
-            // Already running inside our connectedDevice FGS; don't start a
-            // second one with a different type.
-            foreground: false,
-          )
-          .withProgress((percent) {
-            final held = holdDownloadPercent(downloadPercent, percent);
-            if (held <= 1) {
-              (_downloadEta ??= Stopwatch())
-                ..reset()
-                ..start();
-            } else {
-              _downloadEta ??= Stopwatch()..start();
-            }
-            downloadPercent = held;
-            downloadRemainingSec = estimateDownloadRemaining(
-              percent: held,
-              elapsed: _downloadEta!.elapsed,
-            )?.inSeconds;
-            onChanged?.call();
-          })
-          .withCancelToken(_installCancel!)
-          .install();
-    } finally {
-      forkWatch.cancel();
+    final dest = File(p.join(
+      (await getApplicationDocumentsDirectory()).path,
+      modelFilenameFromUrl(modelUrl),
+    ));
+    if (!localModelLooksComplete(dest)) {
+      await waitUntilWifi(isCancelled: () => _disposed);
+      if (_disposed) throw const ChunkedDownloadCancelled();
+      await downloadModelFile(
+        url: modelUrl,
+        dest: dest,
+        token: downloadTokenForModelUrl(modelUrl),
+        onProgress: _onDownloadBytes,
+        isCancelled: () => _disposed,
+      );
     }
+    if (_disposed) throw const ChunkedDownloadCancelled();
+    await FlutterGemma.installModel(
+      modelType: ModelType.gemma4,
+      fileType: ModelFileType.litertlm,
+    ).fromFile(dest.path).install();
+  }
+
+  void _onDownloadBytes(int written, int total) {
+    final percent = percentFromBytes(written, total);
+    final held = holdDownloadPercent(downloadPercent, percent);
+    if (held == downloadPercent && held < 100) return;
+    if (held <= 1) {
+      (_downloadEta ??= Stopwatch())
+        ..reset()
+        ..start();
+    } else {
+      _downloadEta ??= Stopwatch()..start();
+    }
+    downloadPercent = held;
+    downloadRemainingSec = estimateDownloadRemaining(
+      percent: held,
+      elapsed: _downloadEta!.elapsed,
+    )?.inSeconds;
+    onChanged?.call();
   }
 
   Future<InferenceModel> _loadModel() async {
@@ -259,7 +235,7 @@ final class GemmaBrain implements BotBrain {
       isThinking: false,
       modelType: ModelType.gemma4,
       toolChoice: ToolChoice.auto,
-      systemInstruction: kGemmaSystemInstruction,
+      systemInstruction: kPersonaSystemInstruction,
       maxOutputTokens: kGemmaMaxOutputTokens,
     );
   }
@@ -292,54 +268,86 @@ final class GemmaBrain implements BotBrain {
         isUser: true,
       ));
       submitWatch.stop();
-      final submitMs = submitWatch.elapsedMilliseconds;
-
-      var firstTokenMs = 0;
-      var decodeMs = 0;
-      String? firstTokenText;
-      Stopwatch? decodeWatch;
-      var completed = false;
-
-      await for (final event in _generateTurn()) {
-        if (event is TextDelta) {
-          if (decodeWatch == null) {
-            firstTokenMs = totalWatch.elapsedMilliseconds;
-            firstTokenText = event.text;
-            decodeWatch = Stopwatch()..start();
-          }
-        }
-        yield event;
-        if (event is Done || event is BrainError) {
-          completed = event is Done;
-          decodeWatch?.stop();
-          decodeMs = decodeWatch?.elapsedMilliseconds ?? 0;
-          break;
-        }
-      }
-
-      lastLatency = LatencyTrace(
-        downloadMs: _warmDownloadMs,
-        modelLoadMs: _warmLoadMs,
-        chatCreateMs: _warmChatMs,
-        submitMs: submitMs,
-        firstTokenMs: firstTokenMs,
-        decodeMs: decodeMs,
-        totalMs: totalWatch.elapsedMilliseconds,
-        backend: _backend,
-        firstTokenText: firstTokenText,
+      yield* _streamAfterSubmit(
+        totalWatch: totalWatch,
+        submitMs: submitWatch.elapsedMilliseconds,
       );
-      // Warm-up stages are one-shot; later turns shouldn't keep reprinting
-      // a minutes-long download.
-      _warmDownloadMs = null;
-      _warmLoadMs = null;
-      _warmChatMs = null;
-      Log.i(_tag, lastLatency!.summary);
-      onChanged?.call();
-      if (!completed) yield const Done();
     } catch (e, stack) {
       Log.e(_tag, 'respond failed', e, stack);
       yield BrainError('$e');
     }
+  }
+
+  @override
+  Stream<BrainEvent> respondToCue(String cue, ConversationContext ctx) async* {
+    if (_disposed || !_warm || _chat == null) {
+      yield BrainError(_disposed
+          ? 'brain used after dispose'
+          : 'respond() before warmUp() completed');
+      return;
+    }
+
+    final totalWatch = Stopwatch()..start();
+    try {
+      await _resetAndSeed(ctx);
+      Log.i(_tag, 'submit cue "${cue.length > 80 ? '${cue.substring(0, 80)}…' : cue}"');
+      final submitWatch = Stopwatch()..start();
+      await _chat!.addQueryChunk(Message.text(text: cue, isUser: true));
+      submitWatch.stop();
+      yield* _streamAfterSubmit(
+        totalWatch: totalWatch,
+        submitMs: submitWatch.elapsedMilliseconds,
+      );
+    } catch (e, stack) {
+      Log.e(_tag, 'respondToCue failed', e, stack);
+      yield BrainError('$e');
+    }
+  }
+
+  Stream<BrainEvent> _streamAfterSubmit({
+    required Stopwatch totalWatch,
+    required int submitMs,
+  }) async* {
+    var firstTokenMs = 0;
+    var decodeMs = 0;
+    String? firstTokenText;
+    Stopwatch? decodeWatch;
+    var completed = false;
+
+    await for (final event in _generateTurn()) {
+      if (event is TextDelta) {
+        if (decodeWatch == null) {
+          firstTokenMs = totalWatch.elapsedMilliseconds;
+          firstTokenText = event.text;
+          decodeWatch = Stopwatch()..start();
+        }
+      }
+      yield event;
+      if (event is Done || event is BrainError) {
+        completed = event is Done;
+        decodeWatch?.stop();
+        decodeMs = decodeWatch?.elapsedMilliseconds ?? 0;
+        break;
+      }
+    }
+
+    lastLatency = LatencyTrace(
+      downloadMs: _warmDownloadMs,
+      modelLoadMs: _warmLoadMs,
+      chatCreateMs: _warmChatMs,
+      submitMs: submitMs,
+      firstTokenMs: firstTokenMs,
+      decodeMs: decodeMs,
+      totalMs: totalWatch.elapsedMilliseconds,
+      backend: _backend,
+      firstTokenText: firstTokenText,
+    );
+    _warmDownloadMs = null;
+    _warmLoadMs = null;
+    _warmChatMs = null;
+    Log.i(_tag, lastLatency!.summary);
+    onChanged?.call();
+    if (!completed) yield const Done();
   }
 
   /// One user turn, including the tool-call → tool-response loop. Yields
@@ -374,9 +382,13 @@ final class GemmaBrain implements BotBrain {
         return;
       }
       for (final call in pending) {
+        final args = Map<String, dynamic>.from(call.args);
+        final result = executeTool != null
+            ? await executeTool!(call.name, args)
+            : stubToolResult(call.name, args);
         await _chat!.addQueryChunk(Message.toolResponse(
           toolName: call.name,
-          response: stubToolResult(call.name, call.args),
+          response: result,
         ));
       }
     }
@@ -416,7 +428,6 @@ final class GemmaBrain implements BotBrain {
     _disposed = true;
     _warm = false;
     _clearDownloadProgress();
-    _installCancel?.cancel('GemmaBrain.dispose');
     try {
       await _chat?.close();
     } catch (e) {

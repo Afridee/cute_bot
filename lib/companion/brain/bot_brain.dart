@@ -56,6 +56,10 @@ abstract interface class BotBrain {
   /// exactly one [Done] or [BrainError].
   Stream<BrainEvent> respond(AudioClip audio, ConversationContext ctx);
 
+  /// Responds to a non-audio cue (M4 timer fire). Same serialization and
+  /// event contract as [respond] — never a second concurrent session.
+  Stream<BrainEvent> respondToCue(String cue, ConversationContext ctx);
+
   Future<void> dispose();
 }
 
