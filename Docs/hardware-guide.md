@@ -178,19 +178,52 @@ Suggested path:
 
 ## Protocol mapping (firmware must implement)
 
-From `lib/shared/ble_protocol.dart`:
+From `lib/shared/ble_protocol.dart`. The companion does **not** treat the
+simulator as a special peer — the same writes, notifies, and probes hit a
+real ESP32. Firmware that only implements “advertise and look connectable”
+will drop the link.
 
-| Bot capability | Wire surface |
-|----------------|--------------|
-| Mic → phone | GATT notify `audioFromBot`, IMA ADPCM, 16 kHz, start/end flags |
-| Phone → speaker | GATT write `audioToBot`, same audio format |
-| LED eyes | Control `set_led(r, g, b, pattern)` — off, solid, blink, breathe |
-| Chirps / beeps | Control `play_sound(name)` — chirp, beep, purr, alarm (samples in firmware) |
-| Battery | Control `get_battery()` → telemetry % + millivolts |
-| Wiggle | Control `wiggle()` — **ignore or no-op in minimal v1** |
+| Companion feature | Wire surface | Firmware |
+|-------------------|--------------|----------|
+| Scan / CDM link | Advertise name `CuteBot` **and** service UUID `cb070001-…` in the **primary** advertisement | Required. Flags + name + 128-bit UUID = 30 of 31 ADV bytes. Scan-response-only UUID is not enough for CDM. |
+| Mic → phone | Notify `audioFromBot`, IMA ADPCM, 16 kHz, start/end flags | Required. VAD (or a button) sets the same flags the simulator’s hold-to-talk sets. Do not notify a frame larger than MTU−3. Wait until MTU ≥ 171 (or shrink the block). |
+| Phone → speaker (TTS) | Write-without-response `audioToBot`, same audio format | Required. Decode each self-contained ADPCM block. On **start-of-utterance**, set `BotState.speaking` and **mute the mic** (no AEC on ESP32). On end, unmute. |
+| LED eyes | Control `set_led(r, g, b, pattern)` — off, solid, blink, breathe | Required. Companion also uses this for warming / thinking / phone alerts. |
+| Chirps / beeps | Control `play_sound(name)` — chirp, beep, purr, alarm | Required (samples in firmware). Companion chirps on reply start and phone alerts. |
+| Battery | Control `get_battery()` → telemetry notify `%` + mV | Required, and **fast** (≤ 1 s). Companion probes this whenever inbound has gone quiet; a missed notify looks like a dead CCCD and forces reconnect. |
+| Wiggle | Control `wiggle()` | Optional. **ACK and no-op** if there is no servo. Do not ATT-error. |
+| Captions | Control `show_text` | Optional. Simulator subtitle only. **ACK and ignore** on a speaker-only bot. Do not ATT-error — that reconnects the phone. |
+| Unknown command id | Any other control id | **ACK and ignore.** Same rule as `show_text` / `wiggle`. |
+| Pairing | Open GATT (simulator phase); CDM calls `createBond` | Accept Just Works pairing (no IO). Or advertise a static address so CDM does not need an IRK. |
 
-Request MTU **517** on connect; audio frames need MTU ≥ 171. Advertised name:
-`CuteBot`.
+Request MTU **517** on connect; audio frames need MTU ≥ 171. Characteristics:
+
+| UUID | Properties |
+|------|------------|
+| `cb070002` audio-from-bot | Notify (+ CCCD 0x2902) |
+| `cb070003` audio-to-bot | Write without response |
+| `cb070004` control | Write (with response) |
+| `cb070005` telemetry | Read + notify (+ CCCD) |
+
+GATT permissions stay **open** for now (`PairingPolicy.open`). Bonding is a
+CDM implementation detail on the phone, not encrypted characteristics.
+
+Malformed frames: drop them. Never crash. Prefer ACK over an ATT error on
+a write that landed on the right characteristic.
+
+### What the companion will do on a live ESP32 (same as simulator)
+
+These already flow over BLE today; they must work on hardware:
+
+1. Auto-connect by service UUID, MTU 517, subscribe audio + telemetry.
+2. Spoken utterances → Gemma → TTS ADPCM on `audioToBot`.
+3. `set_led` / `play_sound` for brain state, tools, and phone alerts.
+4. `get_battery` for the model **and** as a notify-liveness probe.
+5. `set_timer` lives on the phone (no firmware).
+6. CDM “Link bot to Android” for wake-on-approach.
+
+Push-to-talk is **simulator UI only**. The desk bot listens with VAD; the
+phone already reassembles on start/end flags.
 
 Pairing: moves to **bonded-only** before real hardware ships (CDM wake-on-
 approach uses bonding on the phone side). See `PairingPolicy` in
@@ -240,4 +273,6 @@ If you expand beyond minimal v1 later:
 | `lib/shared/ble_protocol.dart` | Full BLE contract for firmware port |
 | `Docs/m0-testing-guide.md` | Simulator + nRF Connect human-bar test |
 | `Docs/m1-testing-guide.md` | Two-phone bandwidth gate |
+| `Docs/m2.5-testing-guide.md` | Keep-alive / CDM / phone-alerts human bar (passed) |
+| `Docs/m4-testing-guide.md` | Two-phone TTS / timer / battery human bar (passed) |
 | `Docs/companion-setup.md` | Phone first-run setup |

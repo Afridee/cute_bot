@@ -1,8 +1,8 @@
 /// Phone-side tool dispatch (M4).
 ///
 /// Maps Gemma tool names onto BLE control writes, the phone timer store,
-/// and battery telemetry. The simulator already renders those writes as
-/// on-screen body language; real hardware will too.
+/// and battery telemetry. The same writes hit the simulator or a real
+/// ESP32; firmware no-ops `wiggle` if there is no servo.
 library;
 
 import 'dart:async';

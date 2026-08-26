@@ -1,5 +1,11 @@
 # M4 / M5 human-bar test — tools, timers, TTS
 
+> **Status:** M4 / M5 human bar **passed** (two phones, Aug 2026). Spoken
+> reply on the simulator speaker, `get_battery` in the spoken follow-up,
+> timer announcement after companion kill/restore, captions as subtitle,
+> phone speaker quiet. Keep this page as the re-run procedure. Current
+> product status: `README.md`.
+
 Agent bar: unit tests pass for timer persistence, battery tool results,
 sentence splitting, WAV parse/resample, and BLE utterance framing.
 This page is the **two-phone** check.
@@ -49,6 +55,8 @@ the simulator's faked percent (87), not a shrug. Logcat should show
    Due-on-restore timers fire as soon as warm-up finishes.
 
 ## What success looks like
+
+All of the following passed on two phones:
 
 - Spoken reply comes out of the **simulator** speaker.
 - `get_battery` returns a real percent in the spoken follow-up.

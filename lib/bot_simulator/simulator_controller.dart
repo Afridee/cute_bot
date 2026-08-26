@@ -768,6 +768,9 @@ final class SimulatorController extends ChangeNotifier {
         ));
       case ShowTextCommand(:final utf8Text, :final isFinal):
         _onShowText(utf8Text, isFinal: isFinal);
+      case IgnoredControlCommand(:final rawCommandId):
+        _logActivity(
+            'ignored control 0x${rawCommandId.toRadixString(16)}');
     }
   }
 

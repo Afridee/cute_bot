@@ -627,7 +627,7 @@ class _AudioGroup extends StatelessWidget {
           const NdStatusText('[RECEIVING]')
         else if (stats == null)
           Text(
-            'No utterance received yet. Hold-to-talk on the simulator phone.',
+            'No utterance received yet. Talk to the bot.',
             style: nd.typography.body.copyWith(color: nd.colors.textSecondary),
           )
         else ...[

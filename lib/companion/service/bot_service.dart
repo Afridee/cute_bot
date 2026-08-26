@@ -501,8 +501,11 @@ final class BotTaskHandler extends TaskHandler {
     _pushSnapshot();
   }
 
-  /// M3 stand-in for TTS: stream the reply as a caption the simulator can
-  /// show. Frame header + command + flags are 6 bytes; ATT write is MTU-3.
+  /// Optional subtitle for a display bot (simulator). Speaker-only ESP32
+  /// firmware ACKs and ignores [ShowTextCommand]. Streaming captions use
+  /// write-with-response and would jump ahead of TTS audio — only send
+  /// them when TTS is unavailable, plus the finished caption for the
+  /// simulator screen.
   void _pushCaption(BrainSession session) {
     if (session.state == BrainSessionState.responding &&
         session.responseText.isNotEmpty) {
@@ -519,6 +522,7 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   void _sendCaption(String text, {required bool isFinal, bool force = false}) {
+    if (!isFinal && _speaker != null) return;
     if (!isFinal && !force) {
       final now = DateTime.now();
       final elapsed = now.difference(_lastCaptionAt);
@@ -552,6 +556,7 @@ final class BotTaskHandler extends TaskHandler {
       ),
       isFinal ? 'caption' : 'caption…',
       quiet: !isFinal,
+      reconnectOnWriteFailure: false,
     );
   }
 
@@ -775,13 +780,15 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   void _sendControl(ControlMessage message, String label,
-      {bool quiet = false}) {
+      {bool quiet = false, bool reconnectOnWriteFailure = true}) {
     final link = _link;
     if (link == null || link.state != BotLinkState.ready) {
       if (!quiet) _logActivity('$label skipped: not connected');
       return;
     }
-    unawaited(link.sendControl(message).then((_) {
+    unawaited(link
+        .sendControl(message, reconnectOnWriteFailure: reconnectOnWriteFailure)
+        .then((_) {
       if (!quiet) _logActivity(label);
     }).catchError((Object e) {
       _logActivity('$label FAILED: $e');
