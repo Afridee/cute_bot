@@ -581,6 +581,20 @@ final class BotTaskHandler extends TaskHandler {
     try {
       final invoked = await body.invoke(name, args);
       if (invoked.armed != null) _armTimer(invoked.armed!);
+      if (invoked.cancelledId != null) {
+        _dartTimers.remove(invoked.cancelledId)?.cancel();
+        _logActivity('Timer cancelled: ${invoked.result['label'] ?? invoked.cancelledId}');
+        _syncTimerCaptionTicker();
+      }
+      if (invoked.paused != null) {
+        _dartTimers.remove(invoked.paused!.id)?.cancel();
+        _logActivity('Timer paused: ${invoked.paused!.label}');
+        _syncTimerCaptionTicker();
+      }
+      if (invoked.resumed != null) {
+        _armTimer(invoked.resumed!);
+        _logActivity('Timer resumed: ${invoked.resumed!.label}');
+      }
       return invoked.result;
     } catch (e, stack) {
       Log.e(_tag, 'tool $name failed', e, stack);
@@ -592,6 +606,7 @@ final class BotTaskHandler extends TaskHandler {
     final store = _timerStore;
     if (store == null) return;
     for (final timer in store.pending) {
+      if (timer.isPaused) continue;
       _armTimer(timer);
     }
     if (store.pending.isNotEmpty) {
@@ -626,6 +641,7 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   /// Starts, refreshes, or stops the 1 Hz countdown on the bot OLED.
+  /// Paused-only remaining stays on the face but does not tick.
   void _syncTimerCaptionTicker() {
     final store = _timerStore;
     if (store == null || store.pending.isEmpty) {
@@ -633,6 +649,12 @@ final class BotTaskHandler extends TaskHandler {
       return;
     }
     _pushTimerCaption();
+    final anyRunning = store.pending.any((t) => !t.isPaused);
+    if (!anyRunning) {
+      _timerCaptionTicker?.cancel();
+      _timerCaptionTicker = null;
+      return;
+    }
     _timerCaptionTicker ??= Timer.periodic(
       const Duration(seconds: 1),
       (_) => _pushTimerCaption(),
@@ -651,12 +673,12 @@ final class BotTaskHandler extends TaskHandler {
       _stopTimerCaptionTicker();
       return;
     }
-    final soonest = soonestPendingTimer(store.pending);
-    if (soonest == null) {
+    final shown = timerForDisplay(store.pending, DateTime.now());
+    if (shown == null) {
       _stopTimerCaptionTicker();
       return;
     }
-    _sendOledTimerText(formatTimerCountdown(soonest, DateTime.now()));
+    _sendOledTimerText(formatTimerCountdown(shown, DateTime.now()));
   }
 
   static const Duration _batteryWait = Duration(seconds: 2);

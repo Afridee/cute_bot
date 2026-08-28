@@ -15,15 +15,30 @@ import 'timer_store.dart';
 const String _tag = 'BotBody';
 
 /// Result of [BotBody.invoke]. [result] is what the model sees as the
-/// tool response. [fired] is set when a restored timer is already due —
-/// the caller should announce it, not arm a Dart timer.
+/// tool response. Timer fields tell [BotService] how to keep Dart
+/// timers and the OLED countdown in lockstep with the store.
 final class ToolInvokeResult {
-  const ToolInvokeResult(this.result, {this.armed});
+  const ToolInvokeResult(
+    this.result, {
+    this.armed,
+    this.cancelledId,
+    this.paused,
+    this.resumed,
+  });
 
   final Map<String, dynamic> result;
 
   /// Newly armed timer, if this was a successful `set_timer`.
   final PendingTimer? armed;
+
+  /// Id of a timer just dropped by `cancel_timer`.
+  final String? cancelledId;
+
+  /// Timer after a successful `pause_timer` (Dart clock should stop).
+  final PendingTimer? paused;
+
+  /// Timer after a successful `resume_timer` (Dart clock should arm).
+  final PendingTimer? resumed;
 }
 
 final class BotBody {
@@ -97,6 +112,12 @@ final class BotBody {
         });
       case 'set_timer':
         return _setTimer(args);
+      case 'cancel_timer':
+        return _cancelTimer(args);
+      case 'pause_timer':
+        return _pauseTimer(args);
+      case 'resume_timer':
+        return _resumeTimer(args);
       default:
         Log.w(_tag, 'unhandled tool: $name');
         return ToolInvokeResult({'error': 'unknown tool $name'});
@@ -175,9 +196,9 @@ final class BotBody {
       });
     }
     Log.i(_tag, 'timer ${timer.id} armed: ${timer.minutes}m "${timer.label}"');
-    // Deterministic ack. `set_timer` is terminal for the model (no second
-    // decode after it), so the phone confirms instead of trusting the model
-    // to chain express(yes) in the same turn.
+    // Deterministic ack. Timer tools are terminal for the model (no second
+    // decode after them), so the phone confirms instead of trusting the
+    // model to chain express(yes) in the same turn.
     showMood(BotMood.yes, labelPrefix: 'tool set_timer');
     return ToolInvokeResult(
       {
@@ -188,6 +209,76 @@ final class BotBody {
         'firesAt': timer.firesAt.toIso8601String(),
       },
       armed: timer,
+    );
+  }
+
+  Future<ToolInvokeResult> _cancelTimer(Map<String, Object?> args) async {
+    final target = _resolveTimer(args['label']);
+    if (target == null) return _noMatchingTimer('tool cancel_timer');
+    await timers.remove(target.id);
+    Log.i(_tag, 'timer ${target.id} cancelled ("${target.label}")');
+    showMood(BotMood.yes, labelPrefix: 'tool cancel_timer');
+    return ToolInvokeResult(
+      {
+        'status': 'ok',
+        'id': target.id,
+        'label': target.label,
+      },
+      cancelledId: target.id,
+    );
+  }
+
+  Future<ToolInvokeResult> _pauseTimer(Map<String, Object?> args) async {
+    final target = _resolveTimer(args['label']);
+    if (target == null) return _noMatchingTimer('tool pause_timer');
+    final paused = target.pauseAt(now());
+    await timers.update(paused);
+    Log.i(_tag, 'timer ${paused.id} paused ("${paused.label}"), '
+        '${paused.remainingAt(now()).inSeconds}s left');
+    showMood(BotMood.yes, labelPrefix: 'tool pause_timer');
+    return ToolInvokeResult(
+      {
+        'status': 'ok',
+        'id': paused.id,
+        'label': paused.label,
+        'remainingMs': paused.remainingAt(now()).inMilliseconds,
+      },
+      paused: paused,
+    );
+  }
+
+  Future<ToolInvokeResult> _resumeTimer(Map<String, Object?> args) async {
+    final target = _resolveTimer(args['label'], preferPaused: true);
+    if (target == null) return _noMatchingTimer('tool resume_timer');
+    final resumed = target.resumeAt(now());
+    await timers.update(resumed);
+    Log.i(_tag, 'timer ${resumed.id} resumed ("${resumed.label}"), '
+        'fires in ${resumed.remainingAt(now()).inSeconds}s');
+    showMood(BotMood.yes, labelPrefix: 'tool resume_timer');
+    return ToolInvokeResult(
+      {
+        'status': 'ok',
+        'id': resumed.id,
+        'label': resumed.label,
+        'firesAt': resumed.firesAt.toIso8601String(),
+      },
+      resumed: resumed,
+    );
+  }
+
+  ToolInvokeResult _noMatchingTimer(String labelPrefix) {
+    showMood(BotMood.no, labelPrefix: labelPrefix);
+    return const ToolInvokeResult({'error': 'no matching timer'});
+  }
+
+  PendingTimer? _resolveTimer(Object? labelArg, {bool preferPaused = false}) {
+    final label = labelArg is String && labelArg.trim().isNotEmpty
+        ? labelArg.trim()
+        : null;
+    return pickTimer(
+      timers.pending,
+      label: label,
+      preferPaused: preferPaused,
     );
   }
 }

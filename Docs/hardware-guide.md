@@ -148,7 +148,9 @@ These flow today from `BotService` and should look alive on hardware:
 Sounds (`play_sound`) still come from the **speaker**, not the OLED.
 While a timer is pending, the phone streams remaining `HH:MM:SS` on
 `show_text`. Firmware only renders the countdown — it does not run its own
-clock (`set_timer` stays on the phone).
+clock (`set_timer` / `cancel_timer` / `pause_timer` / `resume_timer` stay
+on the phone). Pause stops the 1 Hz writes so the last remaining time
+freezes on the face; cancel clears the line.
 
 ---
 
@@ -289,7 +291,9 @@ These already flow over BLE today; they must work on hardware:
 3. `set_led` / `play_sound` for brain state, tools, and phone alerts.
 4. `show_text` for timer `HH:MM:SS` below the eyes while a countdown is pending.
 5. `get_battery` for the model **and** as a notify-liveness probe.
-6. `set_timer` lives on the phone (no firmware).
+6. `set_timer` / `cancel_timer` / `pause_timer` / `resume_timer` live on
+   the phone (no firmware). Pause freezes the last `show_text` countdown;
+   cancel clears it.
 7. CDM “Link bot to Android” for wake-on-approach.
 
 Push-to-talk is **simulator UI only**. The desk bot listens with VAD; the

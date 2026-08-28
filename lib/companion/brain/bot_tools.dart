@@ -12,8 +12,9 @@ import '../expressions.dart';
 import 'bot_brain.dart';
 
 /// The bot's body, as the model sees it. Mute: `express` is the face;
-/// `set_timer` / `get_battery` are the only other verbs. LED / wiggle /
-/// sound primitives stay phone-side (debug buttons, warming LEDs).
+/// `set_timer` / `cancel_timer` / `pause_timer` / `resume_timer` /
+/// `get_battery` are the other verbs. LED / wiggle / sound primitives
+/// stay phone-side (debug buttons, warming LEDs).
 final List<Tool> kBotTools = [
   Tool(
     name: 'express',
@@ -54,6 +55,52 @@ final List<Tool> kBotTools = [
     },
   ),
   Tool(
+    name: 'cancel_timer',
+    description:
+        'Cancel a pending phone timer so it will not fire. Omit label '
+        'to cancel the soonest one. The phone confirms with a yes '
+        'expression, or no if nothing matches.',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'label': {
+          'type': 'string',
+          'description': 'Which timer to cancel, if more than one',
+        },
+      },
+    },
+  ),
+  Tool(
+    name: 'pause_timer',
+    description:
+        'Pause a running phone timer. Remaining time freezes on the '
+        'face until resume_timer. Omit label to pause the soonest one.',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'label': {
+          'type': 'string',
+          'description': 'Which timer to pause, if more than one',
+        },
+      },
+    },
+  ),
+  Tool(
+    name: 'resume_timer',
+    description:
+        'Resume a paused phone timer. Omit label to resume the paused '
+        'one. The phone confirms with a yes expression.',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'label': {
+          'type': 'string',
+          'description': 'Which timer to resume, if more than one',
+        },
+      },
+    },
+  ),
+  Tool(
     name: 'get_battery',
     description:
         "Read the robot's battery level, then express from the number "
@@ -66,12 +113,13 @@ final List<Tool> kBotTools = [
 ];
 
 /// Tools whose result the model must see before it can express. `express`
-/// and `set_timer` are terminal — do not spend a second decode on them.
+/// and the timer tools are terminal — do not spend a second decode on them.
 bool needsToolFollowUp(String name) => name == 'get_battery';
 
 /// Compact few-shot lines the model may leak as text instead of native
 /// `<|tool_call>` tokens: `express(curious)`, `set_timer(3, tea)`,
-/// `get_battery()`. Order is left-to-right as they appear in [text].
+/// `cancel_timer()`, `get_battery()`. Order is left-to-right as they
+/// appear in [text].
 List<ToolCall> parseLeakedToolCalls(String text) {
   if (text.isEmpty) return const [];
   final calls = <ToolCall>[];
@@ -79,18 +127,20 @@ List<ToolCall> parseLeakedToolCalls(String text) {
     r'\b(?:'
     r'express\s*\(\s*([a-z_]+)\s*\)'
     r'|set_timer\s*\(\s*(\d+)\s*(?:,\s*([^)]*?))?\s*\)'
+    r'|(cancel_timer|pause_timer|resume_timer)\s*\(\s*([^)]*?)\s*\)'
     r'|get_battery\s*\(\s*\)'
     r')',
     caseSensitive: false,
   );
   for (final match in re.allMatches(text)) {
     final raw = match.group(0)!;
-    if (raw.toLowerCase().startsWith('express')) {
+    final lower = raw.toLowerCase();
+    if (lower.startsWith('express')) {
       final mood = match.group(1)?.toLowerCase();
       if (mood != null && expressionFor(mood) != null) {
         calls.add(ToolCall('express', {'mood': mood}));
       }
-    } else if (raw.toLowerCase().startsWith('set_timer')) {
+    } else if (lower.startsWith('set_timer')) {
       final minutes = int.tryParse(match.group(2) ?? '');
       if (minutes == null || minutes < 1) continue;
       var label = (match.group(3) ?? 'timer').trim();
@@ -102,6 +152,19 @@ List<ToolCall> parseLeakedToolCalls(String text) {
       calls.add(ToolCall('set_timer', {
         'minutes': minutes,
         'label': label.isEmpty ? 'timer' : label,
+      }));
+    } else if (lower.startsWith('cancel_timer') ||
+        lower.startsWith('pause_timer') ||
+        lower.startsWith('resume_timer')) {
+      final name = (match.group(4) ?? '').toLowerCase();
+      var label = (match.group(5) ?? '').trim();
+      if (label.length >= 2 &&
+          ((label.startsWith('"') && label.endsWith('"')) ||
+              (label.startsWith("'") && label.endsWith("'")))) {
+        label = label.substring(1, label.length - 1).trim();
+      }
+      calls.add(ToolCall(name, {
+        if (label.isNotEmpty) 'label': label,
       }));
     } else {
       calls.add(const ToolCall('get_battery', {}));
@@ -120,6 +183,10 @@ Map<String, dynamic> stubToolResult(String name, Map<String, dynamic> args) {
     'set_timer' => {
         'status': 'ok',
         'minutes': args['minutes'],
+        'label': args['label'],
+      },
+    'cancel_timer' || 'pause_timer' || 'resume_timer' => {
+        'status': 'ok',
         'label': args['label'],
       },
     'get_battery' => {

@@ -86,7 +86,7 @@ final class ToolCall extends BrainEvent {
   final Map<String, Object?> arguments;
 
   /// Compact line for the transcript / debug panel: `express(delighted)`,
-  /// `set_timer(3, tea)`, `get_battery()`.
+  /// `set_timer(3, tea)`, `cancel_timer()`, `get_battery()`.
   String get transcriptLine {
     if (arguments.isEmpty) return '$name()';
     return '$name(${arguments.values.join(', ')})';

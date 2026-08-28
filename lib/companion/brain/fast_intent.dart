@@ -1,6 +1,7 @@
 /// Rule-based NLU in front of the LLM.
 ///
-/// The bot's action space is tiny (`express` / `set_timer` / `get_battery`)
+/// The bot's action space is tiny (`express` / `set_timer` /
+/// `cancel_timer` / `pause_timer` / `resume_timer` / `get_battery`)
 /// and the persona few-shots are formulaic. High-confidence hits skip
 /// Gemma's audio encode + thought block; anything hedged falls through.
 /// Precision over recall — a wrong timer is worse than a slow one.
@@ -28,6 +29,9 @@ FastIntentHit? matchText(String text) {
   if (_negated(lower)) return null;
 
   return _matchTimerFire(lower) ??
+      _matchCancelTimer(trimmed, lower) ??
+      _matchPauseTimer(trimmed, lower) ??
+      _matchResumeTimer(trimmed, lower) ??
       _matchSetTimer(trimmed, lower) ??
       _matchBattery(lower) ??
       _matchCapabilityNo(lower) ??
@@ -53,7 +57,7 @@ BotMood moodFromBatteryPercent(Object? percent) {
 
 bool _negated(String lower) {
   return RegExp(
-    r"\b(?:don't|do not|didn't|did not|never|not going to|cancel|stop)\b",
+    r"\b(?:don't|do not|didn't|did not|never|not going to)\b",
   ).hasMatch(lower);
 }
 
@@ -67,6 +71,61 @@ FastIntentHit? _matchTimerFire(String lower) {
     );
   }
   return null;
+}
+
+FastIntentHit? _matchCancelTimer(String original, String lower) {
+  if (!RegExp(
+    r'\b(?:cancel|stop|clear|delete)\b.{0,40}\b(?:timer|countdown)\b'
+    r'|\bturn\s+off\b.{0,20}\b(?:timer|countdown)\b',
+  ).hasMatch(lower)) {
+    return null;
+  }
+  final label = _timerControlLabel(original);
+  return FastIntentHit(
+    [
+      ToolCall('cancel_timer', {
+        if (label != null) 'label': label,
+      }),
+    ],
+    reason: 'cancel-timer',
+  );
+}
+
+FastIntentHit? _matchPauseTimer(String original, String lower) {
+  if (!RegExp(
+    r'\b(?:pause|hold)\b.{0,40}\b(?:timer|countdown)\b',
+  ).hasMatch(lower)) {
+    return null;
+  }
+  final label = _timerControlLabel(original);
+  return FastIntentHit(
+    [
+      ToolCall('pause_timer', {
+        if (label != null) 'label': label,
+      }),
+    ],
+    reason: 'pause-timer',
+  );
+}
+
+FastIntentHit? _matchResumeTimer(String original, String lower) {
+  // A duration means set, not resume ("start the timer for 5 minutes").
+  if (_parseMinutesAndLabel(original, lower) != null) return null;
+  if (!RegExp(
+    r'\b(?:resume|unpause|continue)\b.{0,40}\b(?:timer|countdown)\b'
+    r'|\bstart\s+(?:the\s+)?(?:timer|countdown)\b',
+  ).hasMatch(lower)) {
+    return null;
+  }
+  final label = _timerControlLabel(original);
+  return FastIntentHit(
+    [
+      ToolCall('resume_timer', {
+        if (label != null) 'label': label,
+      }),
+    ],
+    reason: 'resume-timer',
+  );
 }
 
 FastIntentHit? _matchSetTimer(String original, String lower) {
@@ -209,8 +268,8 @@ FastIntentHit? _matchComfort(String lower) {
   return null;
 }
 
-/// Acknowledge the request. `stop it` / `stop beeping` hit the negation
-/// guard instead and stay with the LLM.
+/// Acknowledge the request. `stop it` / `stop beeping` stay with the LLM
+/// (no timer word, and they are not hush/quiet).
 FastIntentHit? _matchQuiet(String lower) {
   if (RegExp(
     r'\bbe quiet\b|\bquiet down\b|\bhush\b|\btoo loud\b|\bsh{2,}\b',
@@ -405,5 +464,23 @@ String _labelAfter(String original, int endInLower) {
     '',
   );
   if (rest.isEmpty) return 'timer';
+  return rest;
+}
+
+/// Leftover words after stripping cancel/pause/resume phrasing. Null when
+/// the utterance did not name a specific timer.
+String? _timerControlLabel(String original) {
+  var rest = original.replaceAll(
+    RegExp(
+      r'\b(?:please|cancel|stop|clear|delete|pause|hold|resume|unpause|'
+      r'continue|start|turn|off|again|the|my|this|a|an|timer|countdown|'
+      r'for|called|labelled|labeled|named|on)\b',
+      caseSensitive: false,
+    ),
+    ' ',
+  );
+  rest = rest.replaceAll(RegExp(r'[^\w\s]+'), ' ');
+  rest = rest.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (rest.isEmpty) return null;
   return rest;
 }

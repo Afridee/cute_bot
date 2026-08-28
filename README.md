@@ -190,7 +190,9 @@ percent / mV to the model. `set_timer` persists on the same KV store as
 the transcript (survives kill → restart) and arms a Dart timer; when it
 fires, the announcement enters `BrainSession.handleCue` on the **same**
 serialized conversation queue as spoken turns — never a second LiteRT
-session. Due timers restore after brain warm-up.
+session. Due timers restore after brain warm-up. `cancel_timer`,
+`pause_timer`, and `resume_timer` drop, freeze, or continue a pending
+countdown (the OLED stays on the last `HH:MM:SS` while paused).
 
 ## M5 in one paragraph
 

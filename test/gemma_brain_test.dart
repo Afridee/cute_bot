@@ -147,11 +147,20 @@ void main() {
       expect(needsToolFollowUp('get_battery'), isTrue);
       expect(needsToolFollowUp('express'), isFalse);
       expect(needsToolFollowUp('set_timer'), isFalse);
+      expect(needsToolFollowUp('cancel_timer'), isFalse);
+      expect(needsToolFollowUp('pause_timer'), isFalse);
+      expect(needsToolFollowUp('resume_timer'), isFalse);
     });
 
-    test('model-facing tools are express, set_timer, get_battery', () {
-      expect(kBotTools.map((t) => t.name).toList(),
-          ['express', 'set_timer', 'get_battery']);
+    test('model-facing tools include timer control', () {
+      expect(kBotTools.map((t) => t.name).toList(), [
+        'express',
+        'set_timer',
+        'cancel_timer',
+        'pause_timer',
+        'resume_timer',
+        'get_battery',
+      ]);
     });
   });
 
@@ -229,6 +238,14 @@ void main() {
 
     test('recovers get_battery()', () {
       expect(parseLeakedToolCalls('get_battery()').single.name, 'get_battery');
+    });
+
+    test('recovers cancel_timer / pause_timer / resume_timer', () {
+      expect(parseLeakedToolCalls('cancel_timer()').single.transcriptLine,
+          'cancel_timer()');
+      expect(parseLeakedToolCalls('pause_timer(tea)').single.arguments['label'],
+          'tea');
+      expect(parseLeakedToolCalls('resume_timer()').single.name, 'resume_timer');
     });
   });
 

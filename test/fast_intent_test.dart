@@ -107,10 +107,61 @@ void main() {
     });
   });
 
+  group('timer control', () {
+    test('cancel the timer', () {
+      final hit = matchText('cancel the timer');
+      expect(hit, isNotNull);
+      expect(hit!.reason, 'cancel-timer');
+      expect(hit.calls.single.transcriptLine, 'cancel_timer()');
+    });
+
+    test('stop the timer', () {
+      expect(matchText('stop the timer')!.calls.single.transcriptLine,
+          'cancel_timer()');
+    });
+
+    test('turn off the timer', () {
+      expect(matchText('turn off the timer')!.reason, 'cancel-timer');
+    });
+
+    test('cancel the tea timer keeps the label', () {
+      final call = matchText('cancel the tea timer')!.calls.single;
+      expect(call.name, 'cancel_timer');
+      expect(call.arguments['label'], 'tea');
+    });
+
+    test('pause the timer', () {
+      expect(matchText('pause the timer')!.calls.single.transcriptLine,
+          'pause_timer()');
+    });
+
+    test('pause the tea timer', () {
+      expect(matchText('pause the tea timer')!.calls.single.arguments['label'],
+          'tea');
+    });
+
+    test('resume the timer', () {
+      expect(matchText('resume the timer')!.calls.single.transcriptLine,
+          'resume_timer()');
+    });
+
+    test('start the timer (no duration) is resume', () {
+      expect(matchText('start the timer')!.reason, 'resume-timer');
+    });
+
+    test('start the timer for 5 minutes is still set', () {
+      expect(matchText('start the timer for 5 minutes')!.reason, 'set-timer');
+    });
+
+    test('unpause the countdown', () {
+      expect(matchText('unpause the countdown')!.reason, 'resume-timer');
+    });
+  });
+
   group('precision', () {
     test('negation does not arm a timer', () {
       expect(matchText("don't set a timer for 3 minutes"), isNull);
-      expect(matchText('cancel the timer'), isNull);
+      expect(matchText("don't cancel the timer"), isNull);
     });
 
     test('open-ended chatter is a miss', () {
@@ -227,7 +278,7 @@ void main() {
       expect(matchText('shhh')!.reason, 'quiet');
     });
 
-    test('stop beeping stays a miss (negation guard)', () {
+    test('stop beeping stays a miss', () {
       expect(matchText('stop beeping'), isNull);
     });
   });

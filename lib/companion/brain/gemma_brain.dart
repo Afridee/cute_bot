@@ -346,8 +346,8 @@ final class GemmaBrain implements BotBrain {
 
   /// One user turn. Yields [ToolCall]s as they land so the body can move
   /// immediately. Continues the generate loop only when a result is
-  /// informational ([needsToolFollowUp]); `express` / `set_timer` are
-  /// terminal — no spoken follow-up decode.
+  /// informational ([needsToolFollowUp]); `express` and the timer tools
+  /// are terminal — no spoken follow-up decode.
   ///
   /// Gemma 4 often thinks (or copies the few-shot `express(mood)` line)
   /// as text instead of a native `<|tool_call>`. Those tokens are not
