@@ -169,24 +169,36 @@ final class BotBody {
   }
 
   Future<ToolInvokeResult> _setTimer(Map<String, Object?> args) async {
-    final minutes = _asPositiveInt(args['minutes']);
-    if (minutes == null) {
+    final minutesArg = args.containsKey('minutes') ? _asInt(args['minutes']) : null;
+    final secondsArg = args.containsKey('seconds') ? _asInt(args['seconds']) : null;
+    if (minutesArg == null && secondsArg == null) {
       return const ToolInvokeResult(
-          {'error': 'minutes must be an integer >= 1'});
+          {'error': 'minutes or seconds required'});
     }
-    if (minutes > maxMinutes) {
+    if ((minutesArg != null && minutesArg < 0) ||
+        (secondsArg != null && secondsArg < 0)) {
+      return const ToolInvokeResult(
+          {'error': 'minutes and seconds must be >= 0'});
+    }
+    final totalSeconds = (minutesArg ?? 0) * 60 + (secondsArg ?? 0);
+    if (totalSeconds < 1) {
+      return const ToolInvokeResult(
+          {'error': 'duration must be at least 1 second'});
+    }
+    if (totalSeconds > maxMinutes * 60) {
       return ToolInvokeResult({
-        'error': 'minutes must be <= $maxMinutes',
-        'minutes': minutes,
+        'error': 'duration must be <= $maxMinutes minutes',
+        'seconds': totalSeconds,
       });
     }
     final label = _asLabel(args['label']);
     final t = now();
     final timer = PendingTimer(
       id: newTimerId(t),
-      minutes: minutes,
+      minutes: totalSeconds ~/ 60,
       label: label,
-      firesAt: t.add(Duration(minutes: minutes)),
+      firesAt: t.add(Duration(seconds: totalSeconds)),
+      durationSeconds: totalSeconds,
     );
     final stored = await timers.add(timer);
     if (!stored) {
@@ -195,7 +207,7 @@ final class BotBody {
         'max': TimerStore.maxPending,
       });
     }
-    Log.i(_tag, 'timer ${timer.id} armed: ${timer.minutes}m "${timer.label}"');
+    Log.i(_tag, 'timer ${timer.id} armed: ${timer.totalSeconds}s "${timer.label}"');
     // Deterministic ack. Timer tools are terminal for the model (no second
     // decode after them), so the phone confirms instead of trusting the
     // model to chain express(yes) in the same turn.
@@ -205,6 +217,7 @@ final class BotBody {
         'status': 'ok',
         'id': timer.id,
         'minutes': timer.minutes,
+        'durationSeconds': timer.totalSeconds,
         'label': timer.label,
         'firesAt': timer.firesAt.toIso8601String(),
       },
@@ -283,16 +296,10 @@ final class BotBody {
   }
 }
 
-int? _asPositiveInt(Object? value) {
-  if (value is int) return value >= 1 ? value : null;
-  if (value is double) {
-    final n = value.round();
-    return n >= 1 ? n : null;
-  }
-  if (value is String) {
-    final n = int.tryParse(value);
-    return n != null && n >= 1 ? n : null;
-  }
+int? _asInt(Object? value) {
+  if (value is int) return value;
+  if (value is double) return value.round();
+  if (value is String) return int.tryParse(value);
   return null;
 }
 

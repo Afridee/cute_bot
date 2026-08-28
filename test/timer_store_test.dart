@@ -21,6 +21,19 @@ void main() {
       expect(decoded.isPaused, isFalse);
     });
 
+    test('sub-minute durationSeconds round-trip', () {
+      final t = PendingTimer(
+        id: 't1',
+        minutes: 0,
+        label: 'rest',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000),
+        durationSeconds: 20,
+      );
+      final decoded = PendingTimer.fromMap(t.toMap());
+      expect(decoded!.totalSeconds, 20);
+      expect(decoded.minutes, 0);
+    });
+
     test('paused map round-trip', () {
       final t = PendingTimer(
         id: 't1',
@@ -72,6 +85,16 @@ void main() {
       expect(PendingTimer.fromMap(null), isNull);
       expect(PendingTimer.fromMap({'id': 't', 'minutes': 0, 'label': 'x', 'firesAt': 1}),
           isNull);
+      expect(
+        PendingTimer.fromMap({
+          'id': 't',
+          'minutes': 0,
+          'label': 'x',
+          'firesAt': 1,
+          'durationSeconds': 20,
+        })?.totalSeconds,
+        20,
+      );
     });
   });
 

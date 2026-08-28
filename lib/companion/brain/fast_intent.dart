@@ -75,7 +75,7 @@ FastIntentHit? _matchTimerFire(String lower) {
 
 FastIntentHit? _matchCancelTimer(String original, String lower) {
   if (!RegExp(
-    r'\b(?:cancel|stop|clear|delete)\b.{0,40}\b(?:timer|countdown)\b'
+    r'\b(?:cancel|stop|clear|delete|kill|dismiss|drop|forget)\b.{0,40}\b(?:timer|countdown)\b'
     r'|\bturn\s+off\b.{0,20}\b(?:timer|countdown)\b',
   ).hasMatch(lower)) {
     return null;
@@ -93,7 +93,7 @@ FastIntentHit? _matchCancelTimer(String original, String lower) {
 
 FastIntentHit? _matchPauseTimer(String original, String lower) {
   if (!RegExp(
-    r'\b(?:pause|hold)\b.{0,40}\b(?:timer|countdown)\b',
+    r'\b(?:pause|hold|freeze)\b.{0,40}\b(?:timer|countdown)\b',
   ).hasMatch(lower)) {
     return null;
   }
@@ -110,7 +110,7 @@ FastIntentHit? _matchPauseTimer(String original, String lower) {
 
 FastIntentHit? _matchResumeTimer(String original, String lower) {
   // A duration means set, not resume ("start the timer for 5 minutes").
-  if (_parseMinutesAndLabel(original, lower) != null) return null;
+  if (_parseDurationAndLabel(original, lower) != null) return null;
   if (!RegExp(
     r'\b(?:resume|unpause|continue)\b.{0,40}\b(?:timer|countdown)\b'
     r'|\bstart\s+(?:the\s+)?(?:timer|countdown)\b',
@@ -129,29 +129,83 @@ FastIntentHit? _matchResumeTimer(String original, String lower) {
 }
 
 FastIntentHit? _matchSetTimer(String original, String lower) {
-  final looksLikeSet = RegExp(
-    r'\b(?:set|start|make)\b.+\btimer\b'
-    r'|\btimer\s+for\b'
-    r'|\bremind\s+me\b'
-    r'|\bcount\s?down\b'
-    r'|\bwake\s+me\b',
-  ).hasMatch(lower);
-  if (!looksLikeSet) return null;
+  if (!_looksLikeSetTimer(lower)) return null;
 
-  final parsed = _parseMinutesAndLabel(original, lower);
+  final parsed = _parseDurationAndLabel(original, lower);
   if (parsed == null) return null;
-  final (minutes, label) = parsed;
-  if (minutes < 1 || minutes > 180) return null;
+  final (totalSeconds, label) = parsed;
+  if (totalSeconds < 1 || totalSeconds > 180 * 60) return null;
 
+  final minutes = totalSeconds ~/ 60;
+  final seconds = totalSeconds % 60;
   return FastIntentHit(
     [
       ToolCall('set_timer', {
-        'minutes': minutes,
+        if (minutes > 0) 'minutes': minutes,
+        if (seconds > 0) 'seconds': seconds,
         'label': label,
       }),
     ],
     reason: 'set-timer',
   );
+}
+
+/// Timer-ish utterance, not a bare duration ("in 20 seconds" alone is
+/// chatter). Duration is checked separately so "20 second timer" and
+/// "timer for 20 seconds" both land. A 4–7 letter near-miss of "timer"
+/// (ASR: diamer, dimer, tymer) also counts; still needs a duration.
+bool _looksLikeSetTimer(String lower) {
+  if (RegExp(
+    r'\b(?:set|start|make|create|put|give\s+me|need|want)\b'
+    r'.{0,40}\b(?:a\s+)?(?:timer|countdown|alarm)\b'
+    r'|\b(?:timer|countdown|alarm)\s+(?:for|of|in|to)\b'
+    r'|\b(?:timer|countdown)\b.{0,24}\b(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\b'
+    r'|\b(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\b.{0,16}\b(?:timer|countdown)\b'
+    r'|\bremind\s+me\b'
+    r'|\bcount\s?down\b'
+    r'|\bwake\s+me\b'
+    r'|\btime\s+me\b',
+  ).hasMatch(lower)) {
+    return true;
+  }
+  return _hasNearMissTimerNoun(lower);
+}
+
+/// Zipformer often drops or swaps a letter in "timer". Distance 0 is
+/// already covered above; 1–2 on a short token is the ASR near-miss.
+bool _hasNearMissTimerNoun(String lower) {
+  const target = 'timer';
+  for (final token in lower.split(RegExp(r'[^a-z]+'))) {
+    if (token.length < 4 || token.length > 7) continue;
+    if (token == target) continue;
+    final d = _editDistance(token, target);
+    if (d >= 1 && d <= 2) return true;
+  }
+  return false;
+}
+
+int _editDistance(String a, String b) {
+  if (a == b) return 0;
+  final m = a.length;
+  final n = b.length;
+  var prev = List<int>.generate(n + 1, (j) => j);
+  var curr = List<int>.filled(n + 1, 0);
+  for (var i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (var j = 1; j <= n; j++) {
+      final cost = a.codeUnitAt(i - 1) == b.codeUnitAt(j - 1) ? 0 : 1;
+      final del = prev[j] + 1;
+      final ins = curr[j - 1] + 1;
+      final sub = prev[j - 1] + cost;
+      curr[j] = del < ins
+          ? (del < sub ? del : sub)
+          : (ins < sub ? ins : sub);
+    }
+    final tmp = prev;
+    prev = curr;
+    curr = tmp;
+  }
+  return prev[n];
 }
 
 FastIntentHit? _matchBattery(String lower) {
@@ -348,8 +402,10 @@ FastIntentHit? _matchGreeting(String lower) {
   return null;
 }
 
-(int, String)? _parseMinutesAndLabel(String original, String lower) {
-  // "two and a half hours" — must run before the plain hour check so the
+/// Total seconds plus leftover label. Hours / minutes / seconds (and
+/// mixes like "1 minute 20 seconds") all land here.
+(int, String)? _parseDurationAndLabel(String original, String lower) {
+  // "two and a half hours" — must run before the chunk scan so the
   // "and a half" is not dropped as a label.
   final halfHours = RegExp(
     '\\b(${_numberToken.pattern})\\s+and\\s+a\\s+half\\s+${_hourUnit.pattern}',
@@ -357,7 +413,7 @@ FastIntentHit? _matchGreeting(String lower) {
   if (halfHours != null) {
     final n = _parseNumberToken(halfHours.group(1)!);
     if (n != null) {
-      return (n * 60 + 30, _labelAfter(original, halfHours.end));
+      return (n * 3600 + 1800, _labelAfter(original, halfHours.end));
     }
   }
 
@@ -365,55 +421,57 @@ FastIntentHit? _matchGreeting(String lower) {
   final hourAndHalf =
       RegExp(r'\b(?:an?|one|1)\s+hour\s+and\s+a\s+half\b').firstMatch(lower);
   if (hourAndHalf != null) {
-    return (90, _labelAfter(original, hourAndHalf.end));
+    return (5400, _labelAfter(original, hourAndHalf.end));
   }
 
   // "half an hour" / "half hour"
   final halfHour = RegExp(r'\bhalf\s+(?:an\s+)?hour\b').firstMatch(lower);
   if (halfHour != null) {
-    return (30, _labelAfter(original, halfHour.end));
+    return (1800, _labelAfter(original, halfHour.end));
   }
 
-  final hour = _firstDuration(lower, unit: _hourUnit);
-  if (hour != null) {
-    final minutes = hour.$1 * 60;
-    return (minutes, _labelAfter(original, hour.$2));
+  var total = 0;
+  var lastEnd = -1;
+  for (final match in _durationChunk.allMatches(lower)) {
+    final n = _parseNumberToken(match.group(1)!);
+    if (n == null) continue;
+    final secs = match.group(2) != null
+        ? n * 3600
+        : match.group(3) != null
+            ? n * 60
+            : n;
+    total += secs;
+    lastEnd = match.end;
   }
-  final minute = _firstDuration(lower, unit: _minuteUnit);
-  if (minute != null) {
-    return (minute.$1, _labelAfter(original, minute.$2));
-  }
-  // "set a timer for 3, tea" — bare number only when a timer verb is present.
+  if (lastEnd >= 0) return (total, _labelAfter(original, lastEnd));
+
+  // "set a timer for 3, tea" — bare number is minutes.
   final bare = RegExp(r'\bfor\s+(\d+)\b').firstMatch(lower);
   if (bare != null) {
     final n = int.tryParse(bare.group(1)!);
     if (n == null) return null;
-    return (n, _labelAfter(original, bare.end));
+    return (n * 60, _labelAfter(original, bare.end));
   }
   return null;
 }
 
-final _hourUnit = RegExp(r'\b(?:hours?|hrs?)\b');
-final _minuteUnit = RegExp(r'\b(?:minutes?|mins?|min)\b');
+final _hourUnit = RegExp(r'(?:hours?|hrs?)');
+final _minuteUnit = RegExp(r'(?:minutes?|mins?|min)');
+final _secondUnit = RegExp(r'(?:seconds?|secs?|s)');
 
-/// `(value, endIndexInLower)` of the first `<number> <unit>` pair.
-(int, int)? _firstDuration(String lower, {required RegExp unit}) {
-    final pattern = RegExp(
-      '\\b(${_numberToken.pattern})\\s*${unit.pattern}',
-      caseSensitive: false,
-    );
-  final match = pattern.firstMatch(lower);
-  if (match == null) return null;
-  final n = _parseNumberToken(match.group(1)!);
-  if (n == null) return null;
-  return (n, match.end);
-}
+/// `<number>[-]hours|minutes|seconds` — hyphenated "20-second" counts.
+final _durationChunk = RegExp(
+  '\\b(${_numberToken.pattern})(?:\\s+of)?\\s*-?\\s*'
+  '(?:(${_hourUnit.pattern})|(${_minuteUnit.pattern})|(${_secondUnit.pattern}))'
+  r'\b',
+);
 
 final _numberToken = RegExp(
   r'\d+|forty-five|a couple|a few|'
   r'one|two|three|four|five|six|seven|eight|nine|ten|'
   r'eleven|twelve|thirteen|fourteen|fifteen|sixteen|'
-  r'seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|a|an',
+  r'seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|'
+  r'seventy|eighty|ninety|a|an',
 );
 
 int? _parseNumberToken(String raw) {
@@ -445,6 +503,9 @@ int? _parseNumberToken(String raw) {
     'forty-five' => 45,
     'fifty' => 50,
     'sixty' => 60,
+    'seventy' => 70,
+    'eighty' => 80,
+    'ninety' => 90,
     _ => null,
   };
 }
@@ -472,7 +533,7 @@ String _labelAfter(String original, int endInLower) {
 String? _timerControlLabel(String original) {
   var rest = original.replaceAll(
     RegExp(
-      r'\b(?:please|cancel|stop|clear|delete|pause|hold|resume|unpause|'
+      r'\b(?:please|cancel|stop|clear|delete|kill|dismiss|drop|forget|pause|hold|freeze|resume|unpause|'
       r'continue|start|turn|off|again|the|my|this|a|an|timer|countdown|'
       r'for|called|labelled|labeled|named|on)\b',
       caseSensitive: false,

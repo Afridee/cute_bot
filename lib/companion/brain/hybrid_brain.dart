@@ -20,6 +20,7 @@ final class HybridBrain implements BotBrain {
     this.executeTool,
     this.asr,
     this.onHeard,
+    this.onRoute,
   });
 
   final BotBrain inner;
@@ -33,6 +34,13 @@ final class HybridBrain implements BotBrain {
 
   /// Fired with the ASR transcript (debug panel / activity log).
   final void Function(String text)? onHeard;
+
+  /// Fired after the matcher: [fastIntent] is true when the LLM was skipped.
+  final void Function({
+    required bool fastIntent,
+    String? text,
+    String? reason,
+  })? onRoute;
 
   /// Last ASR transcript, if any. Not a cue.
   String? lastHeardText;
@@ -59,10 +67,12 @@ final class HybridBrain implements BotBrain {
       onHeard?.call(text);
       final hit = matchText(text);
       if (hit != null) {
-        yield* _emitHit(hit, watch);
+        yield* _emitHit(hit, watch, heard: text);
         return;
       }
-      Log.i(_tag, 'asr miss, Gemma: "$text"');
+      _logRoute(fastIntent: false, text: text);
+    } else {
+      _logRoute(fastIntent: false);
     }
     yield* _forward(inner.respond(audio, ctx));
   }
@@ -72,14 +82,20 @@ final class HybridBrain implements BotBrain {
     final watch = Stopwatch()..start();
     final hit = matchText(cue);
     if (hit != null) {
-      yield* _emitHit(hit, watch);
+      yield* _emitHit(hit, watch, heard: cue);
       return;
     }
+    _logRoute(fastIntent: false, text: cue);
     yield* _forward(inner.respondToCue(cue, ctx));
   }
 
-  Stream<BrainEvent> _emitHit(FastIntentHit hit, Stopwatch watch) async* {
-    Log.i(_tag, 'nlp hit ${hit.reason}: '
+  Stream<BrainEvent> _emitHit(
+    FastIntentHit hit,
+    Stopwatch watch, {
+    required String heard,
+  }) async* {
+    _logRoute(fastIntent: true, text: heard, reason: hit.reason);
+    Log.i(_tag, 'Fast intent tools: '
         '${hit.calls.map((c) => c.transcriptLine).join('; ')}');
     final extra = <ToolCall>[];
     for (final call in hit.calls) {
@@ -127,5 +143,27 @@ final class HybridBrain implements BotBrain {
   Future<void> dispose() async {
     await asr?.dispose();
     await inner.dispose();
+  }
+
+  void _logRoute({
+    required bool fastIntent,
+    String? text,
+    String? reason,
+  }) {
+    final heard = (text != null && text.isNotEmpty)
+        ? '"${_preview(text)}"'
+        : '(no transcript)';
+    if (fastIntent) {
+      Log.i(_tag, 'Fast intent (${reason ?? '?'}): $heard');
+    } else {
+      Log.i(_tag, 'LLM: $heard');
+    }
+    onRoute?.call(fastIntent: fastIntent, text: text, reason: reason);
+  }
+
+  static String _preview(String text) {
+    final flat = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (flat.length <= 80) return flat;
+    return '${flat.substring(0, 80)}…';
   }
 }

@@ -76,6 +76,38 @@ void main() {
     expect(hybrid.lastLatency?.backend, 'nlp');
   });
 
+  test('onRoute reports Fast intent hits and LLM misses', () async {
+    final routes = <({bool fast, String? text, String? reason})>[];
+    void capture({required bool fastIntent, String? text, String? reason}) {
+      routes.add((fast: fastIntent, text: text, reason: reason));
+    }
+
+    final hitBrain = HybridBrain(
+      inner: _inner(),
+      asr: _ScriptedAsr('do a little dance'),
+      onRoute: capture,
+    );
+    await hitBrain.warmUp();
+    await hitBrain.respond(_clip(), _emptyCtx()).toList();
+    expect(routes, hasLength(1));
+    expect(routes.single.fast, isTrue);
+    expect(routes.single.text, 'do a little dance');
+    expect(routes.single.reason, 'dance');
+
+    routes.clear();
+    final missBrain = HybridBrain(
+      inner: _inner(),
+      asr: _ScriptedAsr('tell me a joke about tea'),
+      onRoute: capture,
+    );
+    await missBrain.warmUp();
+    await missBrain.respond(_clip(), _emptyCtx()).toList();
+    expect(routes, hasLength(1));
+    expect(routes.single.fast, isFalse);
+    expect(routes.single.text, 'tell me a joke about tea');
+    expect(routes.single.reason, isNull);
+  });
+
   test('ASR text is logged even when the matcher misses', () async {
     var heard = '';
     final hybrid = HybridBrain(

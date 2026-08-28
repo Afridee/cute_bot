@@ -182,6 +182,15 @@ final class BotTaskHandler extends TaskHandler {
       executeTool: _executeTool,
       asr: SherpaClipAsr(),
       onHeard: (text) => _logActivity('Heard: $text'),
+      onRoute: ({required fastIntent, text, reason}) {
+        if (fastIntent) {
+          _logActivity('Fast intent (${reason ?? '?'})');
+        } else if (text != null && text.isNotEmpty) {
+          _logActivity('LLM');
+        } else {
+          _logActivity('LLM (no transcript)');
+        }
+      },
     );
     _session = BrainSession(
       brain: _hybrid!,
@@ -623,7 +632,7 @@ final class BotTaskHandler extends TaskHandler {
       return;
     }
     _dartTimers[timer.id] = Timer(delay, () => unawaited(_fireTimer(timer)));
-    Log.i(_tag, 'timer ${timer.id} armed ${timer.minutes}m, '
+    Log.i(_tag, 'timer ${timer.id} armed ${timer.totalSeconds}s, '
         'fires in ${delay.inSeconds}s');
     _syncTimerCaptionTicker();
   }

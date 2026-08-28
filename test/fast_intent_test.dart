@@ -105,6 +105,112 @@ void main() {
       final call = matchText('countdown ten minutes')!.calls.single;
       expect(call.arguments['minutes'], 10);
     });
+
+    test('Set timer for 20 seconds is seconds, not minutes', () {
+      final call = matchText('Set timer for 20 seconds')!.calls.single;
+      expect(call.name, 'set_timer');
+      expect(call.arguments['seconds'], 20);
+      expect(call.arguments.containsKey('minutes'), isFalse);
+      expect(call.arguments['label'], 'timer');
+    });
+
+    test('set a timer for 20 seconds', () {
+      expect(matchText('set a timer for 20 seconds')!.calls.single.arguments,
+          {'seconds': 20, 'label': 'timer'});
+    });
+
+    test('twenty seconds as words', () {
+      expect(
+        matchText('set a timer for twenty seconds')!.calls.single.arguments['seconds'],
+        20,
+      );
+    });
+
+    test('20 second timer (unit before timer)', () {
+      final call = matchText('20 second timer')!.calls.single;
+      expect(call.arguments['seconds'], 20);
+    });
+
+    test('hyphenated 20-second timer', () {
+      expect(matchText('set a 20-second timer')!.calls.single.arguments['seconds'],
+          20);
+    });
+
+    test('remind me in 15 seconds', () {
+      expect(matchText('remind me in 15 seconds')!.calls.single.arguments['seconds'],
+          15);
+    });
+
+    test('time me for 10 seconds', () {
+      expect(matchText('time me for 10 seconds')!.calls.single.arguments['seconds'],
+          10);
+    });
+
+    test('ASR near-miss diamer still sets seconds', () {
+      final call =
+          matchText('START THE DIAMER FOR TWENTY SECONDS')!.calls.single;
+      expect(call.name, 'set_timer');
+      expect(call.arguments['seconds'], 20);
+      expect(call.arguments.containsKey('minutes'), isFalse);
+    });
+
+    test('ASR near-miss dimer still sets minutes', () {
+      final call =
+          matchText('CAN YOU SAID THE DIMER FOR TWO MINUTES')!.calls.single;
+      expect(call.name, 'set_timer');
+      expect(call.arguments['minutes'], 2);
+    });
+
+    test('ASR near-miss tymer with duration', () {
+      expect(
+        matchText('start the tymer for five minutes')!.calls.single.arguments,
+        {'minutes': 5, 'label': 'timer'},
+      );
+    });
+
+    test('near-miss timer without a duration is still a miss', () {
+      expect(matchText('start the diamer'), isNull);
+    });
+
+    test('distance-3 noun with a duration stays chatter', () {
+      expect(matchText('start the dinner for two minutes'), isNull);
+    });
+
+    test('I need a timer for 30 seconds', () {
+      expect(
+        matchText('I need a timer for 30 seconds')!.calls.single.arguments['seconds'],
+        30,
+      );
+    });
+
+    test('1 minute 20 seconds is mixed', () {
+      final call =
+          matchText('set a timer for 1 minute 20 seconds, tea')!.calls.single;
+      expect(call.arguments['minutes'], 1);
+      expect(call.arguments['seconds'], 20);
+      expect(call.arguments['label'], 'tea');
+    });
+
+    test('90 seconds is 1 minute 30 seconds', () {
+      final call = matchText('start a timer for 90 seconds')!.calls.single;
+      expect(call.arguments['minutes'], 1);
+      expect(call.arguments['seconds'], 30);
+    });
+
+    test('a couple of seconds', () {
+      expect(
+        matchText('set a timer for a couple of seconds')!.calls.single.arguments['seconds'],
+        2,
+      );
+    });
+
+    test('start the timer for 20 seconds is set, not resume', () {
+      expect(matchText('start the timer for 20 seconds')!.reason, 'set-timer');
+      expect(
+        matchText('start the timer for 20 seconds')!.calls.single.arguments['seconds'],
+        20,
+      );
+    });
   });
 
   group('timer control', () {
@@ -120,8 +226,13 @@ void main() {
           'cancel_timer()');
     });
 
-    test('turn off the timer', () {
-      expect(matchText('turn off the timer')!.reason, 'cancel-timer');
+    test('kill the timer is cancel', () {
+      expect(matchText('kill the timer')!.reason, 'cancel-timer');
+    });
+
+    test('forget the tea timer keeps the label', () {
+      expect(matchText('forget the tea timer')!.calls.single.arguments['label'],
+          'tea');
     });
 
     test('cancel the tea timer keeps the label', () {
@@ -130,9 +241,8 @@ void main() {
       expect(call.arguments['label'], 'tea');
     });
 
-    test('pause the timer', () {
-      expect(matchText('pause the timer')!.calls.single.transcriptLine,
-          'pause_timer()');
+    test('freeze the timer is pause', () {
+      expect(matchText('freeze the timer')!.reason, 'pause-timer');
     });
 
     test('pause the tea timer', () {
@@ -168,6 +278,8 @@ void main() {
       expect(matchText('tell me a joke'), isNull);
       expect(matchText('what time is it'), isNull);
       expect(matchText('I am feeling a bit sad today'), isNull);
+      expect(matchText('20 seconds'), isNull);
+      expect(matchText('give me 20 seconds'), isNull);
     });
 
     test('empty is a miss', () {

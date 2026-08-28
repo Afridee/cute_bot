@@ -44,14 +44,23 @@ final List<Tool> kBotTools = [
       'properties': {
         'minutes': {
           'type': 'integer',
-          'description': 'Minutes until the timer fires',
+          'description':
+              'Whole minutes until the timer fires. Combine with seconds '
+              'for mixed durations (1 minute 20 seconds → minutes 1, '
+              'seconds 20).',
+        },
+        'seconds': {
+          'type': 'integer',
+          'description':
+              'Seconds until the timer fires, or extra seconds on top of '
+              'minutes. Use this for "20 seconds". At least one of '
+              'minutes or seconds is required.',
         },
         'label': {
           'type': 'string',
           'description': 'What the timer is for',
         },
       },
-      'required': ['minutes'],
     },
   ),
   Tool(
@@ -183,6 +192,7 @@ Map<String, dynamic> stubToolResult(String name, Map<String, dynamic> args) {
     'set_timer' => {
         'status': 'ok',
         'minutes': args['minutes'],
+        'seconds': args['seconds'],
         'label': args['label'],
       },
     'cancel_timer' || 'pause_timer' || 'resume_timer' => {

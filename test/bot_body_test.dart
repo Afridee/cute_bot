@@ -106,12 +106,29 @@ void main() {
     expect((sent[1] as PlaySoundCommand).sound, BotSound.chirp);
   });
 
-  test('set_timer rejects minutes < 1 and does not ack', () async {
+  test('set_timer rejects an empty duration and does not ack', () async {
     final got = await body.invoke('set_timer', {'minutes': 0});
-    expect(got.result['error'], contains('minutes'));
+    expect(got.result['error'], contains('duration'));
     expect(got.armed, isNull);
     expect(timers.pending, isEmpty);
     expect(sent, isEmpty);
+  });
+
+  test('set_timer with seconds fires in that many seconds', () async {
+    final got = await body.invoke('set_timer', {'seconds': 20, 'label': 'rest'});
+    expect(got.result['status'], 'ok');
+    expect(got.armed, isNotNull);
+    expect(got.armed!.minutes, 0);
+    expect(got.armed!.totalSeconds, 20);
+    expect(got.armed!.label, 'rest');
+    expect(got.armed!.firesAt.millisecondsSinceEpoch, 1_000_000 + 20 * 1000);
+  });
+
+  test('set_timer minutes plus seconds', () async {
+    final got =
+        await body.invoke('set_timer', {'minutes': 1, 'seconds': 30, 'label': 'tea'});
+    expect(got.armed!.totalSeconds, 90);
+    expect(got.armed!.firesAt.millisecondsSinceEpoch, 1_000_000 + 90 * 1000);
   });
 
   test('set_timer default label', () async {

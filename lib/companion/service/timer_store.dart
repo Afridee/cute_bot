@@ -19,12 +19,21 @@ final class PendingTimer {
     required this.label,
     required this.firesAt,
     this.pausedRemaining,
+    this.durationSeconds,
   });
 
   final String id;
+
+  /// Whole minutes of the original duration (0 for a sub-minute timer).
   final int minutes;
   final String label;
   final DateTime firesAt;
+
+  /// Original duration in seconds. Null on timers persisted before
+  /// sub-minute support; then [totalSeconds] falls back to [minutes] * 60.
+  final int? durationSeconds;
+
+  int get totalSeconds => durationSeconds ?? minutes * 60;
 
   /// Frozen remaining when paused. Null means the clock is running toward
   /// [firesAt].
@@ -51,6 +60,7 @@ final class PendingTimer {
       label: label,
       firesAt: firesAt,
       pausedRemaining: remainingAt(now),
+      durationSeconds: durationSeconds,
     );
   }
 
@@ -63,6 +73,7 @@ final class PendingTimer {
       minutes: minutes,
       label: label,
       firesAt: now.add(held),
+      durationSeconds: durationSeconds,
     );
   }
 
@@ -71,6 +82,7 @@ final class PendingTimer {
         'minutes': minutes,
         'label': label,
         'firesAt': firesAt.millisecondsSinceEpoch,
+        if (durationSeconds != null) 'durationSeconds': durationSeconds,
         if (pausedRemaining != null)
           'pausedRemainingMs': pausedRemaining!.inMilliseconds,
       };
@@ -82,9 +94,20 @@ final class PendingTimer {
     final label = raw['label'];
     final firesAt = raw['firesAt'];
     if (id is! String || id.isEmpty) return null;
-    if (minutes is! int || minutes < 1) return null;
     if (label is! String) return null;
     if (firesAt is! int) return null;
+    final storedSeconds = raw['durationSeconds'];
+    final int totalSeconds;
+    final int wholeMinutes;
+    if (storedSeconds is int && storedSeconds >= 1) {
+      totalSeconds = storedSeconds;
+      wholeMinutes = minutes is int && minutes >= 0 ? minutes : totalSeconds ~/ 60;
+    } else if (minutes is int && minutes >= 1) {
+      totalSeconds = minutes * 60;
+      wholeMinutes = minutes;
+    } else {
+      return null;
+    }
     Duration? pausedRemaining;
     final pausedMs = raw['pausedRemainingMs'];
     if (pausedMs is int && pausedMs >= 0) {
@@ -92,10 +115,11 @@ final class PendingTimer {
     }
     return PendingTimer(
       id: id,
-      minutes: minutes,
+      minutes: wholeMinutes,
       label: label,
       firesAt: DateTime.fromMillisecondsSinceEpoch(firesAt),
       pausedRemaining: pausedRemaining,
+      durationSeconds: totalSeconds,
     );
   }
 }
