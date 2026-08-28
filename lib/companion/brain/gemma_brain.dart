@@ -36,9 +36,6 @@ const int kGemmaMaxTokens = 4096;
 /// Gemma 4's hidden thought block plus one tool-call blob.
 const int kGemmaMaxOutputTokens = kPersonaMaxOutputTokens;
 
-typedef ToolExecutor = Future<Map<String, dynamic>> Function(
-    String name, Map<String, dynamic> args);
-
 final class GemmaBrain implements BotBrain {
   GemmaBrain({
     String? modelUrl,

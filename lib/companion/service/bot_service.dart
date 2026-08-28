@@ -28,6 +28,8 @@ import '../brain/bot_brain.dart';
 import '../brain/brain_session.dart';
 import '../brain/fake_brain.dart';
 import '../brain/gemma_brain.dart';
+import '../brain/hybrid_brain.dart';
+import '../brain/sherpa_clip_asr.dart';
 import '../brain/transcript.dart';
 import '../expressions.dart';
 import 'bot_body.dart';
@@ -50,6 +52,7 @@ final class BotTaskHandler extends TaskHandler {
   BrainSession? _session;
   TranscriptStore? _transcript;
   GemmaBrain? _gemma;
+  HybridBrain? _hybrid;
   BotBody? _body;
   TimerStore? _timerStore;
   final Map<String, Timer> _dartTimers = {};
@@ -152,22 +155,30 @@ final class BotTaskHandler extends TaskHandler {
     );
 
     // CUTEBOT_FAKE_BRAIN=true keeps M2's canned brain for one-phone tests
-    // that must not download 2.6 GB. Default is Gemma 4 E2B.
+    // that must not download 2.6 GB. Default is Gemma 4 E2B. HybridBrain
+    // sits in front either way: ASR + formulaic intents skip the model.
     const useFake = bool.fromEnvironment('CUTEBOT_FAKE_BRAIN');
-    final BotBrain brain;
+    final BotBrain inner;
     if (useFake) {
-      Log.i(_tag, 'brain: FakeBrain (CUTEBOT_FAKE_BRAIN)');
-      brain = FakeBrain();
+      Log.i(_tag, 'brain: FakeBrain + NLP (CUTEBOT_FAKE_BRAIN)');
+      inner = FakeBrain();
     } else {
       _gemma = GemmaBrain(
         onChanged: () => _pushSnapshot(),
         executeTool: _executeTool,
       );
-      brain = _gemma!;
-      Log.i(_tag, 'brain: Gemma 4 E2B');
+      inner = _gemma!;
+      Log.i(_tag, 'brain: Gemma 4 E2B + NLP');
     }
+    _hybrid = HybridBrain(
+      inner: inner,
+      // FakeBrain still dispatches from BrainSession.onToolCall.
+      executeTool: useFake ? null : _executeTool,
+      asr: SherpaClipAsr(),
+      onHeard: (text) => _logActivity('Heard: $text'),
+    );
     _session = BrainSession(
-      brain: brain,
+      brain: _hybrid!,
       transcript: _transcript!,
       onToolCall: (call) {
         _logActivity('Tool call: $call');
@@ -250,6 +261,7 @@ final class BotTaskHandler extends TaskHandler {
     _reassembler.reset();
     _session?.dispose();
     _session = null;
+    _hybrid = null;
     _gemma = null;
     _body = null;
     _timerStore = null;
@@ -802,7 +814,7 @@ final class BotTaskHandler extends TaskHandler {
       brainKind: _gemma?.kind ?? 'FakeBrain',
       downloadPercent: _gemma?.downloadPercent,
       downloadRemainingSec: _gemma?.downloadRemainingSec,
-      lastLatency: _gemma?.lastLatency,
+      lastLatency: _hybrid?.lastLatency ?? _gemma?.lastLatency,
       replayedEntries: session?.replayedEntries ?? 0,
       droppedUtterances: session?.droppedUtterances ?? 0,
       responseText: session?.responseText ?? '',

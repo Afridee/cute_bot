@@ -86,6 +86,24 @@ void main() {
     });
   });
 
+  group('pcm16ToFloat32', () {
+    test('maps int16 extremes into [-1, 1)', () {
+      final pcm = Int16List.fromList([0, 32767, -32768]);
+      final out = pcm16ToFloat32(pcm);
+      expect(out[0], 0);
+      expect(out[1], closeTo(32767 / 32768.0, 1e-9));
+      expect(out[2], -1.0);
+    });
+  });
+
+  group('clipLooksSilent', () {
+    test('zeros are silent; a speech-like peak is not', () {
+      expect(clipLooksSilent(Int16List(1600)), isTrue);
+      expect(clipLooksSilent(Int16List.fromList([0, 0, 800, 0])), isFalse);
+      expect(clipLooksSilent(Int16List.fromList([0, 50, -20])), isTrue);
+    });
+  });
+
   group('LatencyTrace', () {
     test('summary names the stages a logcat grepping human will look for', () {
       const trace = LatencyTrace(

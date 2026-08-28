@@ -151,6 +151,24 @@ Int16List _pcm16Mono(Uint8List data, {required int channels, required int bits})
   throw FormatException('WAV bits-per-sample $bits is not 8 or 16');
 }
 
+/// Normalized mono samples for sherpa-onnx (`[-1, 1]`).
+Float32List pcm16ToFloat32(Int16List pcm) {
+  final out = Float32List(pcm.length);
+  for (var i = 0; i < pcm.length; i++) {
+    out[i] = pcm[i] / 32768.0;
+  }
+  return out;
+}
+
+/// True when the clip is effectively silence (fake utterances, VAD leaks).
+/// Peak of 400/32768 is well below speech on the bot mic.
+bool clipLooksSilent(Int16List pcm, {int peakFloor = 400}) {
+  for (final s in pcm) {
+    if (s.abs() >= peakFloor) return false;
+  }
+  return true;
+}
+
 /// Linear-interpolation resample to [toRate]. Same rate is a no-op copy.
 Int16List resamplePcm16(Int16List input,
     {required int fromRate, required int toRate}) {
