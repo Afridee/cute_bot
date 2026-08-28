@@ -1,5 +1,6 @@
 import 'package:cute_bot/companion/brain/transcript.dart';
 import 'package:cute_bot/companion/service/timer_store.dart';
+import 'package:cute_bot/shared/timer_display.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -37,6 +38,67 @@ void main() {
       expect(PendingTimer.fromMap(null), isNull);
       expect(PendingTimer.fromMap({'id': 't', 'minutes': 0, 'label': 'x', 'firesAt': 1}),
           isNull);
+    });
+  });
+
+  group('formatTimerCountdown', () {
+    test('formats HH:MM:SS remaining', () {
+      final now = DateTime.fromMillisecondsSinceEpoch(0);
+      final t = PendingTimer(
+        id: 't1',
+        minutes: 1,
+        label: '',
+        firesAt: now.add(const Duration(seconds: 5)),
+      );
+      expect(formatTimerCountdown(t, now), '00:00:05');
+      expect(
+        formatTimerCountdown(
+          PendingTimer(
+            id: 't2',
+            minutes: 1,
+            label: '',
+            firesAt: now.add(const Duration(minutes: 1)),
+          ),
+          now,
+        ),
+        '00:01:00',
+      );
+      expect(
+        formatTimerCountdown(
+          PendingTimer(
+            id: 't3',
+            minutes: 180,
+            label: '',
+            firesAt: now.add(const Duration(minutes: 180)),
+          ),
+          now,
+        ),
+        '03:00:00',
+      );
+    });
+
+    test('isTimerDisplayText matches wire shape', () {
+      expect(isTimerDisplayText('00:04:59'), isTrue);
+      expect(isTimerDisplayText('03:00:00'), isTrue);
+      expect(isTimerDisplayText('thinking…'), isFalse);
+      expect(isTimerDisplayText('set_timer(1, tea)'), isFalse);
+    });
+
+    test('soonestPendingTimer picks earliest firesAt', () {
+      final a = PendingTimer(
+        id: 'a',
+        minutes: 1,
+        label: 'a',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(200),
+      );
+      final b = PendingTimer(
+        id: 'b',
+        minutes: 1,
+        label: 'b',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(100),
+      );
+      expect(soonestPendingTimer([a, b])?.id, 'b');
+      expect(soonestPendingTimer(const []), isNull);
     });
   });
 

@@ -18,9 +18,12 @@ import 'face_painter.dart';
 import 'face_pose.dart';
 
 class BotVisor extends StatefulWidget {
-  const BotVisor({super.key, required this.mood});
+  const BotVisor({super.key, required this.mood, this.timerDisplay = ''});
 
   final VisorMood mood;
+
+  /// `HH:MM:SS` countdown below the eyes while a timer is pending.
+  final String timerDisplay;
 
   @override
   State<BotVisor> createState() => _BotVisorState();
@@ -282,7 +285,10 @@ class _BotVisorState extends State<BotVisor>
           valueListenable: _time,
           builder: (context, t, _) {
             return CustomPaint(
-              painter: FacePainter(pose: _framePose(t)),
+              painter: FacePainter(
+                pose: _framePose(t),
+                timerDisplay: widget.timerDisplay,
+              ),
               size: Size.infinite,
             );
           },

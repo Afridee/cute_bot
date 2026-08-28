@@ -127,9 +127,10 @@ compact actuator commands; firmware renders the face locally.
    `face_pose.dart` + `bot_visor.dart` (morph ~350 ms, mood-specific idle,
    periodic blink). The simulator’s Flutter painter is the art reference;
    firmware draws equivalent arcs/hearts/sparkles into the OLED framebuffer.
-3. **`show_text(utf8, isFinal)`** — optional caption line under or beside the
-   visor (`thinking…`, `express(delighted)`, etc.). ACK and ignore if you
-   skip captions in v1, but do not ATT-error.
+3. **`show_text(utf8, isFinal)`** — optional **timer countdown only** on the
+   OLED: `HH:MM:SS` below the eyes in the visor neon color. Thinking / tool
+   lines stay on the phone. ACK and ignore if you skip the row in v1, but do
+   not ATT-error.
 
 ### Lifecycle the companion already sends
 
@@ -140,10 +141,14 @@ These flow today from `BotService` and should look alive on hardware:
 | Warming | blue breathe (`sleepy`) | Half-lidded sleepy face |
 | Thinking | purple breathe | Orbiting-pupil “thinking” animation |
 | Reply | mood from `express(...)` | Matching mood (hearts, arcs, …) |
+| Timer pending | `show_text` `HH:MM:SS` (~1 Hz) | Neon countdown below the eyes |
 | ~8 s idle | LED off | Neutral resting face (gentle drift + blink) |
 | ~60 s idle | blue breathe | Dozing sleepy face |
 
 Sounds (`play_sound`) still come from the **speaker**, not the OLED.
+While a timer is pending, the phone streams remaining `HH:MM:SS` on
+`show_text`. Firmware only renders the countdown — it does not run its own
+clock (`set_timer` stays on the phone).
 
 ---
 
@@ -254,7 +259,7 @@ will drop the link.
 | Mic → phone | Notify `audioFromBot`, IMA ADPCM, 16 kHz, start/end flags | Required. VAD (or a button) sets the same flags the simulator’s hold-to-talk sets. Do not notify a frame larger than MTU−3. Wait until MTU ≥ 171 (or shrink the block). |
 | Phone → speaker (TTS) | Write-without-response `audioToBot`, same audio format | Required. Decode each self-contained ADPCM block. On **start-of-utterance**, set `BotState.speaking` and **mute the mic** (no AEC on ESP32). On end, unmute. |
 | Face mood | Control `set_led(r, g, b, pattern)` — off, solid, blink, breathe | Required. Firmware maps each signature to a visor mood and runs the OLED eye engine. Also used for warming / thinking / phone alerts / expression decay. |
-| Captions | Control `show_text` | Recommended. Render UTF-8 caption on OLED (or a status row). **ACK and ignore** if skipped in v1. Do not ATT-error — that reconnects the phone. |
+| Captions | Control `show_text` | Recommended. Render **timer countdown only** (`HH:MM:SS`) below the eyes in the visor neon color. **ACK and ignore** if skipped in v1. Do not ATT-error — that reconnects the phone. |
 | Chirps / beeps | Control `play_sound(name)` — chirp, beep, purr, alarm | Required (samples in firmware). Companion chirps on reply start and phone alerts. |
 | Battery | Control `get_battery()` → telemetry notify `%` + mV | Required, and **fast** (≤ 1 s). Companion probes this whenever inbound has gone quiet; a missed notify looks like a dead CCCD and forces reconnect. |
 | Wiggle | Control `wiggle()` | Optional. **ACK and no-op** if there is no servo. Do not ATT-error. |
@@ -282,7 +287,7 @@ These already flow over BLE today; they must work on hardware:
 1. Auto-connect by service UUID, MTU 517, subscribe audio + telemetry.
 2. Spoken utterances → Gemma → TTS ADPCM on `audioToBot`.
 3. `set_led` / `play_sound` for brain state, tools, and phone alerts.
-4. `show_text` for thinking captions and tool-line subtitles (when implemented).
+4. `show_text` for timer `HH:MM:SS` below the eyes while a countdown is pending.
 5. `get_battery` for the model **and** as a notify-liveness probe.
 6. `set_timer` lives on the phone (no firmware).
 7. CDM “Link bot to Android” for wake-on-approach.

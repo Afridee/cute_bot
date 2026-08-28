@@ -117,10 +117,8 @@ final class BotTaskHandler extends TaskHandler {
   static const Duration _dozeAfterIdle = Duration(seconds: 60);
   Timer? _expressionDecay;
 
-  BrainSessionState? _lastCaptionBrainState;
-  DateTime _lastCaptionAt = DateTime.fromMillisecondsSinceEpoch(0);
-  Timer? _pendingCaption;
-  static const Duration _minCaptionGap = Duration(milliseconds: 200);
+  /// 1 Hz OLED timer countdown (`show_text` on the face is timer-only).
+  Timer? _timerCaptionTicker;
 
   // Notification throttle: change-only, capped at one update per gap with a
   // trailing update so the final state always lands (same pattern as
@@ -181,8 +179,7 @@ final class BotTaskHandler extends TaskHandler {
     }
     _hybrid = HybridBrain(
       inner: inner,
-      // FakeBrain still dispatches from BrainSession.onToolCall.
-      executeTool: useFake ? null : _executeTool,
+      executeTool: _executeTool,
       asr: SherpaClipAsr(),
       onHeard: (text) => _logActivity('Heard: $text'),
     );
@@ -191,12 +188,8 @@ final class BotTaskHandler extends TaskHandler {
       transcript: _transcript!,
       onToolCall: (call) {
         _logActivity('Tool call: $call');
-        // FakeBrain has no executor inside respond(); GemmaBrain already
-        // awaited _executeTool before yielding the ToolCall.
-        if (useFake) {
-          unawaited(_executeTool(
-              call.name, Map<String, dynamic>.from(call.arguments)));
-        }
+        // GemmaBrain already awaited _executeTool before yielding ToolCall.
+        // FakeBrain / NLP: HybridBrain.executeTool handles dispatch.
       },
     )..addListener(_onBrainChanged);
 
@@ -256,7 +249,8 @@ final class BotTaskHandler extends TaskHandler {
     Log.w(_tag, 'service destroyed (timeout: $isTimeout)');
     _pendingSnapshot?.cancel();
     _pendingNotification?.cancel();
-    _pendingCaption?.cancel();
+    _timerCaptionTicker?.cancel();
+    _timerCaptionTicker = null;
     _phoneAlertRestore?.cancel();
     _expressionDecay?.cancel();
     _utteranceIdle?.cancel();
@@ -453,66 +447,29 @@ final class BotTaskHandler extends TaskHandler {
       _expressBrainState(session.state, hadError: session.lastError != null);
       _scheduleExpressionDecay(session.state);
     }
-    _pushCaption(session);
     _updateNotification();
     _pushSnapshot();
   }
 
-  /// Caption for a display bot (simulator or desk-bot OLED). Firmware without
-  /// a screen ACKs and ignores [ShowTextCommand]. Mute path: the caption is
-  /// the compact tool line (`express(delighted)` / `thinking…`), not speech.
-  void _pushCaption(BrainSession session) {
-    if (session.state == BrainSessionState.thinking) {
-      _sendCaption('thinking…', isFinal: false);
-    }
-    if (session.state == BrainSessionState.responding &&
-        session.responseText.isNotEmpty) {
-      _sendCaption(session.responseText, isFinal: false);
-    }
-    if (_lastCaptionBrainState == BrainSessionState.responding &&
-        session.state == BrainSessionState.ready &&
-        session.lastResponseText.isNotEmpty) {
-      _pendingCaption?.cancel();
-      _pendingCaption = null;
-      _sendCaption(session.lastResponseText, isFinal: true, force: true);
-    }
-    _lastCaptionBrainState = session.state;
-  }
-
-  void _sendCaption(String text, {required bool isFinal, bool force = false}) {
-    if (!isFinal && !force) {
-      final now = DateTime.now();
-      final elapsed = now.difference(_lastCaptionAt);
-      if (elapsed < _minCaptionGap) {
-        _pendingCaption ??= Timer(_minCaptionGap - elapsed, () {
-          _pendingCaption = null;
-          final session = _session;
-          if (session != null &&
-              session.state == BrainSessionState.responding &&
-              session.responseText.isNotEmpty) {
-            _sendCaption(session.responseText, isFinal: false, force: true);
-          }
-        });
-        return;
-      }
-    }
-    _pendingCaption?.cancel();
-    _pendingCaption = null;
-    _lastCaptionAt = DateTime.now();
-
+  /// Sends timer countdown (or clear) to the bot OLED via [ShowTextCommand].
+  void _sendOledTimerText(String text) {
     final link = _link;
-    if (link == null || link.state != BotLinkState.ready) return;
-    // header(4) + cmd(1) + flags(1) + ATT(3) → remaining bytes for UTF-8.
+    if (link == null || link.state != BotLinkState.ready) {
+      Log.w(_tag, 'timer OLED skipped (link ${link?.state.name ?? 'null'}): '
+          '${text.isEmpty ? 'clear' : text}');
+      return;
+    }
     final maxUtf8 = (link.mtu - 9).clamp(16, 500);
     final utf8Text = _utf8Truncated(text, maxUtf8);
+    Log.i(_tag, 'timer OLED -> ${text.isEmpty ? '(clear)' : text}');
     _sendControl(
       ShowTextCommand(
         sequence: _controlSeq.next(),
         utf8Text: utf8Text,
-        isFinal: isFinal,
+        isFinal: text.isEmpty,
       ),
-      isFinal ? 'caption' : 'caption…',
-      quiet: !isFinal,
+      text.isEmpty ? 'timer clear' : 'timer',
+      quiet: true,
       reconnectOnWriteFailure: false,
     );
   }
@@ -640,6 +597,7 @@ final class BotTaskHandler extends TaskHandler {
     if (store.pending.isNotEmpty) {
       Log.i(_tag, 'restored ${store.pending.length} timer(s)');
     }
+    _syncTimerCaptionTicker();
   }
 
   void _armTimer(PendingTimer timer) {
@@ -650,6 +608,9 @@ final class BotTaskHandler extends TaskHandler {
       return;
     }
     _dartTimers[timer.id] = Timer(delay, () => unawaited(_fireTimer(timer)));
+    Log.i(_tag, 'timer ${timer.id} armed ${timer.minutes}m, '
+        'fires in ${delay.inSeconds}s');
+    _syncTimerCaptionTicker();
   }
 
   Future<void> _fireTimer(PendingTimer timer) async {
@@ -657,10 +618,45 @@ final class BotTaskHandler extends TaskHandler {
     await _timerStore?.remove(timer.id);
     _logActivity('Timer fired: ${timer.label}');
     Log.i(_tag, 'timer ${timer.id} fired (${timer.label})');
+    _syncTimerCaptionTicker();
     await _session?.handleCue(
       "A timer just finished: '${timer.label}'. "
       'Call express(alarm). Do not speak.',
     );
+  }
+
+  /// Starts, refreshes, or stops the 1 Hz countdown on the bot OLED.
+  void _syncTimerCaptionTicker() {
+    final store = _timerStore;
+    if (store == null || store.pending.isEmpty) {
+      _stopTimerCaptionTicker();
+      return;
+    }
+    _pushTimerCaption();
+    _timerCaptionTicker ??= Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _pushTimerCaption(),
+    );
+  }
+
+  void _stopTimerCaptionTicker() {
+    _timerCaptionTicker?.cancel();
+    _timerCaptionTicker = null;
+    _sendOledTimerText('');
+  }
+
+  void _pushTimerCaption() {
+    final store = _timerStore;
+    if (store == null || store.pending.isEmpty) {
+      _stopTimerCaptionTicker();
+      return;
+    }
+    final soonest = soonestPendingTimer(store.pending);
+    if (soonest == null) {
+      _stopTimerCaptionTicker();
+      return;
+    }
+    _sendOledTimerText(formatTimerCountdown(soonest, DateTime.now()));
   }
 
   static const Duration _batteryWait = Duration(seconds: 2);
@@ -743,6 +739,10 @@ final class BotTaskHandler extends TaskHandler {
       if (session != null) {
         _expressBrainState(session.state,
             hadError: session.lastError != null);
+      }
+      // Timer ticks may have been skipped while the link was down.
+      if (_timerStore?.pending.isNotEmpty ?? false) {
+        _pushTimerCaption();
       }
     } else {
       _notifyLinkReady = false;

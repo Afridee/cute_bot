@@ -8,6 +8,7 @@ library;
 
 import 'dart:convert';
 
+import '../../shared/timer_display.dart';
 import '../brain/transcript.dart';
 
 /// One countdown the bot promised to announce.
@@ -135,3 +136,16 @@ String newTimerId([DateTime? now]) {
   final t = now ?? DateTime.now();
   return 't${t.microsecondsSinceEpoch}';
 }
+
+/// Soonest-firing timer, or null if [pending] is empty.
+PendingTimer? soonestPendingTimer(Iterable<PendingTimer> pending) {
+  PendingTimer? best;
+  for (final t in pending) {
+    if (best == null || t.firesAt.isBefore(best.firesAt)) best = t;
+  }
+  return best;
+}
+
+/// OLED countdown for the soonest pending timer (`HH:MM:SS` only).
+String formatTimerCountdown(PendingTimer timer, DateTime now) =>
+    formatRemainingHhMmSs(timer.remainingAt(now));

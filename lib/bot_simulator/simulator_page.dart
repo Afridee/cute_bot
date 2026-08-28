@@ -164,7 +164,7 @@ class _FaceView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          BotVisor(mood: mood),
+          BotVisor(mood: mood, timerDisplay: controller.timerDisplay),
           const SizedBox(height: CuteBotSpace.md),
           Row(
             children: [

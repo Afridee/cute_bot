@@ -7,12 +7,14 @@ import 'dart:math' as math;
 
 import 'package:flutter/rendering.dart';
 
+import '../../design/tokens.dart';
 import 'face_pose.dart';
 
 class FacePainter extends CustomPainter {
-  const FacePainter({required this.pose});
+  const FacePainter({required this.pose, this.timerDisplay = ''});
 
   final FacePose pose;
+  final String timerDisplay;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -34,6 +36,10 @@ class FacePainter extends CustomPainter {
 
     if (pose.battery > 0.01) {
       _paintBattery(canvas, size, r);
+    }
+
+    if (timerDisplay.isNotEmpty) {
+      _paintTimerDisplay(canvas, size, timerDisplay);
     }
   }
 
@@ -249,7 +255,56 @@ class FacePainter extends CustomPainter {
       ..cubicTo(s * 0.75, -s * 0.70, s * 1.10, s * 0.15, 0, s * 0.90);
   }
 
+  /// Neon countdown centered below the eyes (clear of the eye band).
+  /// Space Mono + visor neon glow — data-as-display per Nothing tokens;
+  /// glow/blur matches the OLED eye pass, not flat companion chrome.
+  void _paintTimerDisplay(Canvas canvas, Size size, String text) {
+    final eyeR = math.min(size.width * 0.135, size.height * 0.30);
+    final fontSize = eyeR * 0.38;
+    final baseStyle = TextStyle(
+      color: pose.color,
+      fontSize: fontSize,
+      fontFamily: CuteBotFonts.mono,
+      fontWeight: FontWeight.w400,
+      letterSpacing: fontSize * 0.04,
+      height: 1.0,
+    );
+    final glow = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: baseStyle.copyWith(
+          color: pose.color.withValues(alpha: 0.55),
+          shadows: [
+            Shadow(
+              color: pose.color.withValues(alpha: 0.85),
+              blurRadius: fontSize * 0.45,
+            ),
+            Shadow(
+              color: pose.color.withValues(alpha: 0.40),
+              blurRadius: fontSize * 0.90,
+            ),
+          ],
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout(maxWidth: size.width * 0.90);
+    final core = TextPainter(
+      text: TextSpan(text: text, style: baseStyle),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout(maxWidth: size.width * 0.90);
+
+    final gap = eyeR * 0.35;
+    final origin = Offset(
+      (size.width - core.width) / 2,
+      size.height - core.height - gap,
+    );
+    glow.paint(canvas, origin);
+    core.paint(canvas, origin);
+  }
+
   @override
   bool shouldRepaint(covariant FacePainter oldDelegate) =>
-      oldDelegate.pose != pose;
+      oldDelegate.pose != pose || oldDelegate.timerDisplay != timerDisplay;
 }

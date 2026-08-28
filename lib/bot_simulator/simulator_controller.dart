@@ -27,6 +27,7 @@ import '../shared/adpcm.dart';
 import '../shared/audio_transport.dart';
 import '../shared/ble_protocol.dart';
 import '../shared/log.dart';
+import '../shared/timer_display.dart';
 import 'advertise_recovery.dart';
 
 const String _tag = 'Simulator';
@@ -142,8 +143,11 @@ final class SimulatorController extends ChangeNotifier {
   final List<SimulatorChatLine> conversation = [];
   static const int _maxChatLines = 40;
 
+  /// Countdown on the face (`HH:MM:SS` from companion timer ticker only).
+  String timerDisplay = '';
+
   // Fake battery served until real hardware exists.
-  static const int _batteryPercent = 87;
+  static const int _batteryPercent = 15;
   static const bool _batteryCharging = false;
   static const int _batteryMillivolts = 3970;
 
@@ -783,18 +787,21 @@ final class SimulatorController extends ChangeNotifier {
 
   void _onShowText(Uint8List utf8Text, {required bool isFinal}) {
     final text = utf8.decode(utf8Text, allowMalformed: true);
-    final last = conversation.isEmpty ? null : conversation.last;
-    if (last != null &&
-        last.role == SimulatorChatRole.bot &&
-        last.streaming) {
-      last.text = text.isEmpty ? last.text : text;
-      last.streaming = !isFinal;
-    } else if (text.isNotEmpty) {
-      _appendChat(SimulatorChatRole.bot, text, streaming: !isFinal);
+    if (text.isEmpty) {
+      if (timerDisplay.isNotEmpty) {
+        Log.i(_tag, 'timer OLED cleared');
+      }
+      timerDisplay = '';
+      notifyListeners();
+      return;
     }
-    if (isFinal && text.isNotEmpty) {
-      _logActivity('bot: $text');
+    if (!isTimerDisplayText(text)) {
+      Log.d(_tag, 'show_text ignored (not timer): $text');
+      return;
     }
+    Log.i(_tag, 'timer OLED display: $text');
+    timerDisplay = text;
+    notifyListeners();
   }
 
   /// Stand-in for the ESP32's canned sound set: a short synthesized tone
