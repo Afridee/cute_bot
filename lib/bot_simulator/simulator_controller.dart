@@ -92,6 +92,11 @@ final class SimulatorController extends ChangeNotifier {
   // Bumped on each wiggle command so the UI can animate.
   int wiggleCount = 0;
 
+  // Arrival order of the last LED / wiggle commands. The visor uses
+  // "wiggle after LED" to tell delighted apart from happy (same LED).
+  DateTime? lastLedAt;
+  DateTime? lastWiggleAt;
+
   bool talking = false;
   int micFramesSent = 0;
 
@@ -751,9 +756,11 @@ final class SimulatorController extends ChangeNotifier {
         ledGreen = green;
         ledBlue = blue;
         ledPattern = pattern;
+        lastLedAt = DateTime.now();
         _logActivity('set_led rgb($red,$green,$blue) ${pattern.name}');
       case WiggleCommand():
         wiggleCount += 1;
+        lastWiggleAt = DateTime.now();
         _logActivity('wiggle');
       case PlaySoundCommand(:final sound):
         _logActivity('play_sound ${sound.name}');

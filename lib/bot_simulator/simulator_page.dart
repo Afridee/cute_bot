@@ -8,6 +8,9 @@ import 'package:flutter/material.dart';
 import '../design/design.dart';
 import '../shared/ble_protocol.dart';
 import 'simulator_controller.dart';
+import 'visor/bot_visor.dart';
+import 'visor/face_pose.dart';
+import 'visor/mood_from_led.dart';
 
 class SimulatorPage extends StatefulWidget {
   const SimulatorPage({super.key});
@@ -18,6 +21,9 @@ class SimulatorPage extends StatefulWidget {
 
 class _SimulatorPageState extends State<SimulatorPage> {
   late final SimulatorController _controller;
+
+  /// Face view is the default; Tech keeps the full debugging screen.
+  bool _friendly = true;
 
   @override
   void initState() {
@@ -47,8 +53,8 @@ class _SimulatorPageState extends State<SimulatorPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      const Padding(
-                        padding: EdgeInsets.fromLTRB(
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(
                           CuteBotSpace.lg,
                           CuteBotSpace.md,
                           CuteBotSpace.lg,
@@ -56,9 +62,14 @@ class _SimulatorPageState extends State<SimulatorPage> {
                         ),
                         child: Row(
                           children: [
-                            NdBackButton(),
-                            SizedBox(width: CuteBotSpace.md),
-                            NdLabel('Bot simulator'),
+                            const NdBackButton(),
+                            const SizedBox(width: CuteBotSpace.md),
+                            const Expanded(child: NdLabel('Bot simulator')),
+                            NdSegmentedControl<bool>(
+                              segments: const [(true, 'Face'), (false, 'Tech')],
+                              value: _friendly,
+                              onChanged: (v) => setState(() => _friendly = v),
+                            ),
                           ],
                         ),
                       ),
@@ -73,25 +84,27 @@ class _SimulatorPageState extends State<SimulatorPage> {
                           child: NdStatusText.error(c.fatalError!),
                         ),
                       Expanded(
-                        child: ListView(
-                          padding: const EdgeInsets.fromLTRB(
-                            CuteBotSpace.lg,
-                            CuteBotSpace.xl,
-                            CuteBotSpace.lg,
-                            CuteBotSpace.xxl,
-                          ),
-                          children: [
-                            _LedEye(controller: c),
-                            const SizedBox(height: CuteBotSpace.xxl),
-                            _ConversationGroup(controller: c),
-                            const SizedBox(height: CuteBotSpace.xxl),
-                            _LinkGroup(controller: c),
-                            const SizedBox(height: CuteBotSpace.xxl),
-                            _AudioGroup(controller: c),
-                            const SizedBox(height: CuteBotSpace.xxl),
-                            _ActivityGroup(controller: c),
-                          ],
-                        ),
+                        child: _friendly
+                            ? _FaceView(controller: c)
+                            : ListView(
+                                padding: const EdgeInsets.fromLTRB(
+                                  CuteBotSpace.lg,
+                                  CuteBotSpace.xl,
+                                  CuteBotSpace.lg,
+                                  CuteBotSpace.xxl,
+                                ),
+                                children: [
+                                  _LedEye(controller: c),
+                                  const SizedBox(height: CuteBotSpace.xxl),
+                                  _ConversationGroup(controller: c),
+                                  const SizedBox(height: CuteBotSpace.xxl),
+                                  _LinkGroup(controller: c),
+                                  const SizedBox(height: CuteBotSpace.xxl),
+                                  _AudioGroup(controller: c),
+                                  const SizedBox(height: CuteBotSpace.xxl),
+                                  _ActivityGroup(controller: c),
+                                ],
+                              ),
                       ),
                     ],
                   ),
@@ -101,6 +114,70 @@ class _SimulatorPageState extends State<SimulatorPage> {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+/// User-friendly view: the animated visor is the whole screen. Primary:
+/// the face. Secondary: the mood word. Tertiary: link status. Everything
+/// else lives in the Tech view.
+class _FaceView extends StatelessWidget {
+  const _FaceView({required this.controller});
+  final SimulatorController controller;
+
+  VisorMood get _mood {
+    final c = controller;
+    if (c.ledPattern == LedPattern.off) return VisorMood.neutral;
+    final recentWiggle = c.lastWiggleAt != null &&
+        c.lastLedAt != null &&
+        c.lastWiggleAt!.isAfter(c.lastLedAt!);
+    return visorMoodForLed(
+      red: c.ledRed,
+      green: c.ledGreen,
+      blue: c.ledBlue,
+      pattern: c.ledPattern,
+      recentWiggle: recentWiggle,
+    );
+  }
+
+  String get _status {
+    final c = controller;
+    if (c.radioState != BluetoothLowEnergyState.poweredOn) {
+      return '[BLUETOOTH OFF]';
+    }
+    if (c.hasConnection) return '[LINKED]';
+    if (c.advertising) return '[WAITING FOR COMPANION]';
+    return '[OFFLINE]';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final mood = _mood;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        CuteBotSpace.lg,
+        CuteBotSpace.xxl,
+        CuteBotSpace.lg,
+        CuteBotSpace.lg,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          BotVisor(mood: mood),
+          const SizedBox(height: CuteBotSpace.md),
+          Row(
+            children: [
+              NdLabel(mood == VisorMood.lowBattery ? 'low battery' : mood.name),
+              const Spacer(),
+              NdStatusText(
+                _status,
+                color: controller.hasConnection ? CuteBotSignal.success : null,
+              ),
+            ],
+          ),
+          const Spacer(),
+        ],
       ),
     );
   }

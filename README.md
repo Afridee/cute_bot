@@ -25,7 +25,7 @@ Gemma). **M5** is TTS to the bot speaker plus `persona.dart`.
 | `lib/shared/log.dart` | Single logging channel with levels. `adb logcat | grep CuteBot`. |
 | `lib/bot_simulator/` | Peripheral (GATT server) mode: a second Android phone standing in for the ESP32. |
 | `lib/companion/` | Central mode — the actual app. `bot_link.dart` (scan / auto-connect / MTU 517 / reconnect backoff / prioritized writes); since M2 the UI is a thin client over the foreground service. |
-| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the `BotBrain` interface, including `respondToCue` for timer fires), `fake_brain.dart`, `gemma_brain.dart`, `brain_session.dart` (serialized conversation queue), `transcript.dart`, `pcm16.dart` / `latency_trace.dart` / `bot_tools.dart`. |
+| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the `BotBrain` interface, including `respondToCue` for timer fires), `fake_brain.dart`, `gemma_brain.dart`, `hybrid_brain.dart` + `fast_intent.dart` (NLP fast path), `sherpa_clip_asr.dart` (on-device ASR so spoken commands can hit that path), `brain_session.dart` (serialized conversation queue), `transcript.dart`, `pcm16.dart` / `latency_trace.dart` / `bot_tools.dart`. |
 | `lib/companion/persona.dart` | M5: system prompt + few-shots. The only place personality lives. |
 | `lib/companion/voice/` | M5: `Voice` interface, `FlutterTtsVoice` (`synthesizeToFile` → WAV → 16 kHz PCM), `FakeVoice`, sentence splitter, `ReplySpeaker` (sentence-by-sentence ADPCM over BLE). |
 | `lib/companion/service/` | Foreground service plus `bot_body.dart` (tool dispatch), `timer_store.dart` (pending timers on the same KV store as the transcript), `service_ipc.dart`, `task_storage.dart`, `notification_text.dart`. |
@@ -73,6 +73,9 @@ Gemma). **M5** is TTS to the bot speaker plus `persona.dart`.
 - `flutter_tts` 4.2.5 — M5. Named in the brief. `synthesizeToFile` (not
   `speak`) so PCM can be resampled to 16 kHz, ADPCM-encoded, and written
   to the bot speaker. The phone speaker stays silent.
+- `sherpa_onnx` 1.13.6 — on-device ASR (zipformer-small English, CPU) so
+  spoken clips become text for the NLP fast path. Gemma still takes native
+  audio when the matcher misses.
 
 ## Protocol summary (v1)
 
@@ -112,7 +115,7 @@ arriving off the radio flow straight into a strictly serialized conversation
 queue (the LiteRT-LM one-conversation rule, enforced from day one); every
 transcript line persists on append via flutter_foreground_task's store, and
 on restart the session reloads the transcript, re-warms, and shows warming
-state on the bot's LEDs (breathing blue) while it does. Kill → restart →
+state on the bot's OLED face (breathing blue) while it does. Kill → restart →
 re-warm is handled as a normal lifecycle: START_STICKY + `allowAutoRestart`
 cover system kills, `autoRunOnBoot` covers reboot, and the UI — now a thin
 client — just renders `ServiceSnapshot`s pushed over the task channel and
@@ -235,7 +238,8 @@ two-phone TTS / timer / battery human bar (passed).
   mic the same way). Hold-to-talk during playback does not start a
   new companion turn.
 - Simulator battery telemetry is faked (87%, 3970 mV).
-- `show_text` is a simulator subtitle. The companion still sends a
+- `show_text` carries UTF-8 captions for the simulator screen and the desk
+  bot's OLED (e.g. `thinking…`, tool lines). The companion still sends a
   **final** caption (and streams only if TTS failed) with
   `reconnectOnWriteFailure: false`. Firmware must ACK unknown / optional
   control ids — an ATT error reconnects the phone. See the firmware table
@@ -273,7 +277,7 @@ two-phone TTS / timer / battery human bar (passed).
   the UI grants permissions before the service starts. Confirmed on
   device: the bot replies with only the foreground service running
   (M3 / M2.5).
-- The service's warming/thinking LED expressions assume the bot is connected;
+- The service's warming/thinking face expressions assume the bot is connected;
   a bot that reconnects mid-state gets a re-send, but a bot that was never
   connected during warm-up simply misses the show. Harmless, revisit with
   real hardware.

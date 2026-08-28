@@ -68,6 +68,10 @@ dependencies:
   # and ship PCM over BLE. Named in the brief.
   flutter_tts: 4.2.5
 
+  # Offline ASR sidecar for the NLP fast path. CPU zipformer, ~28 MB.
+  # Must not share a GPU with LiteRT.
+  sherpa_onnx: 1.13.6
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

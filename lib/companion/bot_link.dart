@@ -788,7 +788,7 @@ final class BotLink extends ChangeNotifier {
   /// Queues a control command ahead of any audio. Completes when the bot
   /// acks the write (control uses write-with-response).
   ///
-  /// Optional commands ([ShowTextCommand] on a speaker-only ESP32) must
+  /// Optional commands ([ShowTextCommand] when firmware has no display) must
   /// pass [reconnectOnWriteFailure] false — an ATT error must not tear
   /// the link the way a dead GATT client does.
   Future<void> sendControl(
@@ -845,7 +845,7 @@ final class BotLink extends ChangeNotifier {
             write.completer.completeError(e);
             // Native GATT client gone (binder died) or the handle is a
             // ghost: Dart still says ready. Drop and rescan. Optional
-            // commands (show_text on a speaker-only bot) must not do this.
+            // commands (show_text on firmware without a display) must not do this.
             if (write.reconnectOnWriteFailure && state == BotLinkState.ready) {
               unawaited(forceReconnect(reason: 'control write failed'));
             }

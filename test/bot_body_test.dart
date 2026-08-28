@@ -96,11 +96,22 @@ void main() {
     expect(timers.pending.single.label, 'tea');
   });
 
-  test('set_timer rejects minutes < 1', () async {
+  test('set_timer acks with a yes expression (set_timer is terminal)', () async {
+    await body.invoke('set_timer', {'minutes': 3, 'label': 'tea'});
+    // BotMood.yes = green blink + chirp.
+    expect(sent, hasLength(2));
+    final led = sent[0] as SetLedCommand;
+    expect((led.red, led.green, led.blue), (0, 255, 0));
+    expect(led.pattern, LedPattern.blink);
+    expect((sent[1] as PlaySoundCommand).sound, BotSound.chirp);
+  });
+
+  test('set_timer rejects minutes < 1 and does not ack', () async {
     final got = await body.invoke('set_timer', {'minutes': 0});
     expect(got.result['error'], contains('minutes'));
     expect(got.armed, isNull);
     expect(timers.pending, isEmpty);
+    expect(sent, isEmpty);
   });
 
   test('set_timer default label', () async {

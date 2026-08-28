@@ -36,6 +36,15 @@ android {
         }
     }
 
+    packaging {
+        jniLibs {
+            // sherpa-onnx ships onnxruntime; keep a single copy if another
+            // plugin also unpacks it.
+            pickFirsts += "**/libonnxruntime.so"
+            pickFirsts += "**/libc++_shared.so"
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.

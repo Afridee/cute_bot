@@ -41,6 +41,11 @@ final class ConversationContext {
   final List<TranscriptEntry> transcript;
 }
 
+/// Live tool dispatch. GemmaBrain uses this inside the generate loop so
+/// the body moves before the turn ends; HybridBrain uses it on NLP hits.
+typedef ToolExecutor = Future<Map<String, dynamic>> Function(
+    String name, Map<String, dynamic> args);
+
 /// The brain. One instance per service lifetime; [warmUp] once at service
 /// start (tens of seconds for a real model), then [respond] per utterance.
 ///
