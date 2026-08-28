@@ -102,6 +102,19 @@ void main() {
       expect(overlay.of(FastIntentId.resumeTimer).noun, contains('diamer'));
       expect(overlay.of(FastIntentId.setTimer).isEmpty, isTrue);
     });
+
+    test('verb-less take stores the noun, not a noun-only phrase', () {
+      final overlay = buildFastIntentOverlay([
+        const VoiceEnrollSample(
+          prompt: 'Resume the timer',
+          intent: FastIntentId.resumeTimer,
+          transcripts: ['THE DIAMOND'],
+        ),
+      ]);
+      final resume = overlay.of(FastIntentId.resumeTimer);
+      expect(resume.noun, contains('diamond'));
+      expect(resume.phrases, isNot(contains('the diamond')));
+    });
   });
 
   group('matchText overlay', () {
@@ -135,6 +148,23 @@ void main() {
             .single
             .name,
         'pause_timer',
+      );
+    });
+
+    test('enrolled hold/kill fire; unenrolled they miss', () {
+      const overlay = FastIntentOverlay(intents: {
+        FastIntentId.pauseTimer: FastIntentAliases(verb: ['hold']),
+        FastIntentId.cancelTimer: FastIntentAliases(verb: ['kill']),
+      });
+      expect(matchText('hold the timer'), isNull);
+      expect(matchText('kill the timer'), isNull);
+      expect(
+        matchText('hold the timer', overlay)!.calls.single.name,
+        'pause_timer',
+      );
+      expect(
+        matchText('kill the timer', overlay)!.calls.single.name,
+        'cancel_timer',
       );
     });
 

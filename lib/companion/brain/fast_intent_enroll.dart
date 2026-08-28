@@ -28,11 +28,11 @@ final class VoiceEnrollLine {
   final FastIntentId intent;
 }
 
-/// Setup script. Order is the wizard order.
+/// Setup script. Order is the wizard order. Canonical phrases only;
+/// speaker synonyms are learned from how these lines come out of ASR.
 const List<VoiceEnrollLine> kVoiceEnrollScript = [
   VoiceEnrollLine('Pause the timer', FastIntentId.pauseTimer),
   VoiceEnrollLine('Pause the tea timer', FastIntentId.pauseTimer),
-  VoiceEnrollLine('Hold the timer', FastIntentId.pauseTimer),
   VoiceEnrollLine('Cancel the timer', FastIntentId.cancelTimer),
   VoiceEnrollLine('Stop the timer', FastIntentId.cancelTimer),
   VoiceEnrollLine('Resume the timer', FastIntentId.resumeTimer),
@@ -138,16 +138,8 @@ const Set<String> kCommonWordBlocklist = {
 /// First content token maps to verb when it is one of these.
 const Set<String> kVerbCueTokens = {
   'pause',
-  'hold',
-  'freeze',
   'cancel',
   'stop',
-  'clear',
-  'delete',
-  'kill',
-  'dismiss',
-  'drop',
-  'forget',
   'resume',
   'unpause',
   'continue',
@@ -164,20 +156,12 @@ const Set<String> kNounCueTokens = {
 const Map<FastIntentId, Set<String>> kDefaultIntentKeywords = {
   FastIntentId.pauseTimer: {
     'pause',
-    'hold',
-    'freeze',
     'timer',
     'countdown',
   },
   FastIntentId.cancelTimer: {
     'cancel',
     'stop',
-    'clear',
-    'delete',
-    'kill',
-    'dismiss',
-    'drop',
-    'forget',
     'turn',
     'off',
     'timer',
@@ -195,26 +179,16 @@ const Map<FastIntentId, Set<String>> kDefaultIntentKeywords = {
     'set',
     'start',
     'make',
-    'create',
-    'put',
-    'give',
-    'need',
-    'want',
     'timer',
     'countdown',
     'alarm',
     'remind',
-    'wake',
-    'time',
   },
   FastIntentId.battery: {
     'battery',
     'charged',
     'charge',
     'power',
-    'juice',
-    'running',
-    'low',
   },
 };
 
@@ -339,12 +313,30 @@ _TakeResult? _alignTake(String prompt, String transcript) {
     }
     return null;
   }();
+  phrase = _distinctivePhrase(phrase, nounSub);
 
   return _TakeResult(
     phrase: phrase,
     verb: _slotAlias(verbSub),
     noun: _slotAlias(nounSub),
   );
+}
+
+/// Drop phrases that are only a determiner plus the timer-noun stand-in
+/// (`the diamond`). Slot product already covers verb × noun; a noun-only
+/// span would match cancel/pause utterances that share that noun.
+String? _distinctivePhrase(String? phrase, String? nounSub) {
+  if (phrase == null) return null;
+  final toks = tokenizeUtterance(phrase);
+  final distinctive = [
+    for (final t in toks)
+      if (!kAlignStopwords.contains(t) &&
+          !kNounCueTokens.contains(t) &&
+          t != nounSub)
+        t,
+  ];
+  if (distinctive.isEmpty) return null;
+  return phrase;
 }
 
 String? _slotAlias(String? token) {

@@ -220,9 +220,9 @@ lands as `WAS THE TEMPER`. This step records those substitutions and
 overlays them on the fast-intent matcher. No Gemma. Alignment is
 deterministic.
 
-**UI:** 12 prompted lines, 5 successful transcripts each (empty / silence
+**UI:** 11 prompted lines, 5 successful transcripts each (empty / silence
 does not count). The line to say is the display type (one break). Line
-counter `03 / 12` as a Space Mono label; takes as a 5-segment bar. Last
+counter `03 / 11` as a Space Mono label; takes as a 5-segment bar. Last
 ASR line under HEARD in data type. Skip this line after 3 successes.
 Speak into the bot or Bot Simulator — same Zipformer as live commands.
 No phone primary: speaking is hold-to-talk on the robot. If nothing is
