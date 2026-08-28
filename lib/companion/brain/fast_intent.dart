@@ -9,6 +9,7 @@ library;
 
 import '../expressions.dart';
 import 'bot_brain.dart';
+import 'fast_intent_overlay.dart';
 
 /// One conservative match. [calls] is what the body should run, in order.
 final class FastIntentHit {
@@ -21,19 +22,20 @@ final class FastIntentHit {
 /// Parse [text] (a cue, or a future ASR transcript). Null = let the LLM go.
 ///
 /// Checks run narrow-to-broad: tool intents first, then specific moods,
-/// with the catch-all greeting (`hey`/`hi`/...) last.
-FastIntentHit? matchText(String text) {
+/// with the catch-all greeting (`hey`/`hi`/...) last. Optional [overlay] is
+/// additive: defaults run first; enrolled phrases/slots only if they miss.
+FastIntentHit? matchText(String text, [FastIntentOverlay? overlay]) {
   final trimmed = text.trim();
   if (trimmed.isEmpty) return null;
   final lower = trimmed.toLowerCase();
   if (_negated(lower)) return null;
 
   return _matchTimerFire(lower) ??
-      _matchCancelTimer(trimmed, lower) ??
-      _matchPauseTimer(trimmed, lower) ??
-      _matchResumeTimer(trimmed, lower) ??
-      _matchSetTimer(trimmed, lower) ??
-      _matchBattery(lower) ??
+      _matchCancelTimer(trimmed, lower, overlay) ??
+      _matchPauseTimer(trimmed, lower, overlay) ??
+      _matchResumeTimer(trimmed, lower, overlay) ??
+      _matchSetTimer(trimmed, lower, overlay) ??
+      _matchBattery(lower, overlay) ??
       _matchCapabilityNo(lower) ??
       _matchDance(lower) ??
       _matchPlay(lower) ??
@@ -46,6 +48,20 @@ FastIntentHit? matchText(String text) {
       _matchFarewell(lower) ??
       _matchGreeting(lower);
 }
+
+const _pauseVerbs = ['pause', 'hold', 'freeze'];
+const _cancelVerbs = [
+  'cancel',
+  'stop',
+  'clear',
+  'delete',
+  'kill',
+  'dismiss',
+  'drop',
+  'forget',
+];
+const _resumeVerbs = ['resume', 'unpause', 'continue', 'start'];
+const _timerNouns = ['timer', 'countdown'];
 
 /// Battery percent → the mood the persona asks for after `get_battery`.
 BotMood moodFromBatteryPercent(Object? percent) {
@@ -73,63 +89,86 @@ FastIntentHit? _matchTimerFire(String lower) {
   return null;
 }
 
-FastIntentHit? _matchCancelTimer(String original, String lower) {
+FastIntentHit? _matchCancelTimer(
+  String original,
+  String lower,
+  FastIntentOverlay? overlay,
+) {
+  final aliases = overlay?.of(FastIntentId.cancelTimer);
   if (!RegExp(
     r'\b(?:cancel|stop|clear|delete|kill|dismiss|drop|forget)\b.{0,40}\b(?:timer|countdown)\b'
     r'|\bturn\s+off\b.{0,20}\b(?:timer|countdown)\b',
   ).hasMatch(lower)) {
-    return null;
+    if (!_overlayControlHits(lower, aliases, _cancelVerbs)) return null;
   }
-  final label = _timerControlLabel(original);
+  final label = _timerControlLabel(original, aliases);
   return FastIntentHit(
     [
       ToolCall('cancel_timer', {
-        if (label != null) 'label': label,
+        'label': ?label,
       }),
     ],
     reason: 'cancel-timer',
   );
 }
 
-FastIntentHit? _matchPauseTimer(String original, String lower) {
+FastIntentHit? _matchPauseTimer(
+  String original,
+  String lower,
+  FastIntentOverlay? overlay,
+) {
+  final aliases = overlay?.of(FastIntentId.pauseTimer);
   if (!RegExp(
     r'\b(?:pause|hold|freeze)\b.{0,40}\b(?:timer|countdown)\b',
   ).hasMatch(lower)) {
-    return null;
+    if (!_overlayControlHits(lower, aliases, _pauseVerbs)) return null;
   }
-  final label = _timerControlLabel(original);
+  final label = _timerControlLabel(original, aliases);
   return FastIntentHit(
     [
       ToolCall('pause_timer', {
-        if (label != null) 'label': label,
+        'label': ?label,
       }),
     ],
     reason: 'pause-timer',
   );
 }
 
-FastIntentHit? _matchResumeTimer(String original, String lower) {
+FastIntentHit? _matchResumeTimer(
+  String original,
+  String lower,
+  FastIntentOverlay? overlay,
+) {
   // A duration means set, not resume ("start the timer for 5 minutes").
   if (_parseDurationAndLabel(original, lower) != null) return null;
+  final aliases = overlay?.of(FastIntentId.resumeTimer);
   if (!RegExp(
     r'\b(?:resume|unpause|continue)\b.{0,40}\b(?:timer|countdown)\b'
     r'|\bstart\s+(?:the\s+)?(?:timer|countdown)\b',
   ).hasMatch(lower)) {
-    return null;
+    if (!_overlayControlHits(lower, aliases, _resumeVerbs)) return null;
   }
-  final label = _timerControlLabel(original);
+  final label = _timerControlLabel(original, aliases);
   return FastIntentHit(
     [
       ToolCall('resume_timer', {
-        if (label != null) 'label': label,
+        'label': ?label,
       }),
     ],
     reason: 'resume-timer',
   );
 }
 
-FastIntentHit? _matchSetTimer(String original, String lower) {
-  if (!_looksLikeSetTimer(lower)) return null;
+FastIntentHit? _matchSetTimer(
+  String original,
+  String lower,
+  FastIntentOverlay? overlay,
+) {
+  final aliases = overlay?.of(FastIntentId.setTimer);
+  final defaultLook = _looksLikeSetTimer(lower);
+  final overlayLook =
+      aliases != null && _overlayPhraseHits(lower, aliases.phrases);
+  if (!defaultLook && !overlayLook) return null;
 
   final parsed = _parseDurationAndLabel(original, lower);
   if (parsed == null) return null;
@@ -208,7 +247,7 @@ int _editDistance(String a, String b) {
   return prev[n];
 }
 
-FastIntentHit? _matchBattery(String lower) {
+FastIntentHit? _matchBattery(String lower, FastIntentOverlay? overlay) {
   if (RegExp(
     r'\b(?:battery|charged?|how much power|power left'
     r'|juice left|running low)\b',
@@ -218,7 +257,56 @@ FastIntentHit? _matchBattery(String lower) {
       reason: 'battery',
     );
   }
+  final aliases = overlay?.of(FastIntentId.battery);
+  if (aliases != null && _overlayPhraseHits(lower, aliases.phrases)) {
+    return const FastIntentHit(
+      [ToolCall('get_battery', {})],
+      reason: 'battery',
+    );
+  }
   return null;
+}
+
+/// Enrolled phrase as a token span, or overlay-verb × overlay-noun /
+/// overlay-verb × default noun / default-verb × overlay-noun.
+bool _overlayControlHits(
+  String lower,
+  FastIntentAliases? aliases,
+  List<String> defaultVerbs,
+) {
+  if (aliases == null || aliases.isEmpty) return false;
+  if (_overlayPhraseHits(lower, aliases.phrases)) return true;
+  if (_slotPairHits(lower, aliases.verb, aliases.noun)) return true;
+  if (_slotPairHits(lower, aliases.verb, _timerNouns)) return true;
+  if (_slotPairHits(lower, defaultVerbs, aliases.noun)) return true;
+  return false;
+}
+
+bool _overlayPhraseHits(String lower, List<String> phrases) {
+  if (phrases.isEmpty) return false;
+  final hay = tokenizeUtterance(lower);
+  for (final phrase in phrases) {
+    final ned = tokenizeUtterance(phrase);
+    if (ned.isEmpty || hay.length < ned.length) continue;
+    for (var i = 0; i <= hay.length - ned.length; i++) {
+      var ok = true;
+      for (var k = 0; k < ned.length; k++) {
+        if (hay[i + k] != ned[k]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return true;
+    }
+  }
+  return false;
+}
+
+bool _slotPairHits(String lower, List<String> verbs, List<String> nouns) {
+  if (verbs.isEmpty || nouns.isEmpty) return false;
+  final v = verbs.map(RegExp.escape).join('|');
+  final n = nouns.map(RegExp.escape).join('|');
+  return RegExp('\\b($v)\\b.{0,40}\\b($n)\\b').hasMatch(lower);
 }
 
 /// The persona says the bot must `express(no)` when asked to do something
@@ -530,10 +618,20 @@ String _labelAfter(String original, int endInLower) {
 
 /// Leftover words after stripping cancel/pause/resume phrasing. Null when
 /// the utterance did not name a specific timer.
-String? _timerControlLabel(String original) {
+String? _timerControlLabel(String original, [FastIntentAliases? aliases]) {
+  final extra = <String>[
+    ...?aliases?.verb,
+    ...?aliases?.noun,
+    for (final phrase in aliases?.phrases ?? const <String>[])
+      ...tokenizeUtterance(phrase),
+  ];
+  final extraPat = extra.isEmpty
+      ? ''
+      : '${extra.map(RegExp.escape).join('|')}|';
   var rest = original.replaceAll(
     RegExp(
-      r'\b(?:please|cancel|stop|clear|delete|kill|dismiss|drop|forget|pause|hold|freeze|resume|unpause|'
+      '\\b(?:$extraPat'
+      r'please|cancel|stop|clear|delete|kill|dismiss|drop|forget|pause|hold|freeze|resume|unpause|'
       r'continue|start|turn|off|again|the|my|this|a|an|timer|countdown|'
       r'for|called|labelled|labeled|named|on)\b',
       caseSensitive: false,

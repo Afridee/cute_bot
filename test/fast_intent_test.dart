@@ -1,4 +1,5 @@
 import 'package:cute_bot/companion/brain/fast_intent.dart';
+import 'package:cute_bot/companion/brain/fast_intent_overlay.dart';
 import 'package:cute_bot/companion/expressions.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -462,6 +463,22 @@ void main() {
 
     test('howdy → curious', () {
       expect(matchText('howdy')!.calls.single.arguments['mood'], 'curious');
+    });
+  });
+
+  group('overlay', () {
+    test('enrolled pause phrase hits; unrelated was-the does not', () {
+      const overlay = FastIntentOverlay(intents: {
+        FastIntentId.pauseTimer: FastIntentAliases(
+          phrases: ['was the temper'],
+          verb: ['pose', 'pros'],
+          noun: ['temper', 'tamper'],
+        ),
+      });
+      expect(matchText('WAS THE TEMPER BZZ', overlay)!.reason, 'pause-timer');
+      expect(matchText('I was the one who set the timer', overlay)?.reason,
+          isNot('pause-timer'));
+      expect(matchText('pause the timer', overlay)!.reason, 'pause-timer');
     });
   });
 

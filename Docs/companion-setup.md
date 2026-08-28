@@ -13,6 +13,7 @@ Open Companion
        → Autostart / Recents (vivo/iQOO only; skip later)
        → Link bot to Android (skip later)
        → Wait for brain ready
+       → Teach it how you sound (skip later)
        → debug panel
 ```
 
@@ -44,6 +45,7 @@ re-block):
 
 - OEM autostart / Recents lock (vivo/iQOO only)
 - CDM “Link bot to Android”
+- Voice enroll (“Teach it how you sound”)
 
 **Not a step:** BLE connection to a live bot. Scan/connect stays automatic
 once the service is up. The bot may be off or in another room.
@@ -203,7 +205,46 @@ set.
 **FakeBrain:** this step is omitted.
 
 If the download already finished during steps 3–6, the step is already
-satisfied and the panel unlocks.
+satisfied and the wizard continues to voice enroll.
+
+### 8. Teach it how you sound — skip later
+
+**Title:** Teach it how you sound
+
+**Body:** The bot’s ears turn your words into text. Your voice may come
+out wrong. Say these lines so pause and timers still work. Use the robot
+or Bot Simulator. Skip if the bot isn’t here.
+
+Zipformer (the on-device ASR) mangles some speakers so “Pause the timer”
+lands as `WAS THE TEMPER`. This step records those substitutions and
+overlays them on the fast-intent matcher. No Gemma. Alignment is
+deterministic.
+
+**UI:** 12 prompted lines, 5 successful transcripts each (empty / silence
+does not count). The line to say is the display type (one break). Line
+counter `03 / 12` as a Space Mono label; takes as a 5-segment bar. Last
+ASR line under HEARD in data type. Skip this line after 3 successes.
+Speak into the bot or Bot Simulator — same Zipformer as live commands.
+No phone primary: speaking is hold-to-talk on the robot. If nothing is
+connected, status is `[WAITING]`. While receiving: `[LISTENING]`. Silence:
+`[MISSED]`.
+
+**Secondary:** I’ll do this later.
+
+**Tertiary:** Skip this line (after 3 takes).
+
+**Done when:** overlay is saved, or user skips. Persist
+`voiceEnrollSkipped` on skip. Overlay JSON is `fast_intent_overlay_v1` on
+the same KeyValueStore as the transcript. Skipping later does not wipe an
+existing overlay.
+
+Unfinished (never skipped, no overlay) re-shows on the next Companion
+open. Re-enroll from the debug panel overwrites the overlay.
+
+**FakeBrain:** keep this step — Sherpa still warms; enrollment does not
+need Gemma.
+
+Not a BLE-connection gate for the rest of setup: skip is always available.
 
 ### Unlock
 
@@ -218,6 +259,8 @@ on vivo/iQOO.
 - `setupWelcomeSeen` — first-run only; re-entry skips Welcome.
 - `oemKeepAliveAcknowledged` / `oemKeepAliveSkipped`
 - `cdmSkipped`
+- `voiceEnrollSkipped`
+- `fast_intent_overlay_v1` — enrolled fast-intent phrases/slots (JSON)
 - No `setupComplete` flag.
 
 ## Out of scope

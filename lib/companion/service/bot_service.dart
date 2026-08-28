@@ -27,12 +27,14 @@ import '../bot_link.dart';
 import '../brain/bot_brain.dart';
 import '../brain/brain_session.dart';
 import '../brain/fake_brain.dart';
+import '../brain/fast_intent_overlay.dart';
 import '../brain/gemma_brain.dart';
 import '../brain/hybrid_brain.dart';
 import '../brain/sherpa_clip_asr.dart';
 import '../brain/transcript.dart';
 import '../expressions.dart';
 import 'bot_body.dart';
+import 'fast_intent_store.dart';
 import 'notification_text.dart';
 import 'service_ipc.dart';
 import 'task_storage.dart';
@@ -55,6 +57,7 @@ final class BotTaskHandler extends TaskHandler {
   HybridBrain? _hybrid;
   BotBody? _body;
   TimerStore? _timerStore;
+  FastIntentStore? _fastIntentStore;
   final Map<String, Timer> _dartTimers = {};
   Completer<({int percent, int millivolts, bool charging})>? _batteryWaiter;
   late UtteranceReassembler _reassembler;
@@ -91,6 +94,10 @@ final class BotTaskHandler extends TaskHandler {
   // reaction off while keeping the keep-alive benefit of the listener.
   static const String _phoneAlertsKey = 'phoneAlertsEnabled';
   bool _phoneAlertsEnabled = true;
+
+  bool _voiceEnrollActive = false;
+  String _lastEnrollTranscript = '';
+  int _enrollSeq = 0;
 
   /// Actuation debounce on top of the listener's 3 s forward debounce: a
   /// burst of alerts becomes one blink+chirp, not a BLE flood.
@@ -154,6 +161,8 @@ final class BotTaskHandler extends TaskHandler {
     _transcript = TranscriptStore(const TaskKeyValueStore());
     _timerStore = TimerStore(const TaskKeyValueStore());
     await _timerStore!.load();
+    _fastIntentStore = FastIntentStore(const TaskKeyValueStore());
+    await _fastIntentStore!.load();
     _body = BotBody(
       timers: _timerStore!,
       sendControl: _sendControl,
@@ -181,6 +190,7 @@ final class BotTaskHandler extends TaskHandler {
       inner: inner,
       executeTool: _executeTool,
       asr: SherpaClipAsr(),
+      overlay: _fastIntentStore?.overlay,
       onHeard: (text) => _logActivity('Heard: $text'),
       onRoute: ({required fastIntent, text, reason}) {
         if (fastIntent) {
@@ -278,6 +288,7 @@ final class BotTaskHandler extends TaskHandler {
     _gemma = null;
     _body = null;
     _timerStore = null;
+    _fastIntentStore = null;
     _link?.dispose();
     _link = null;
     _bringUp = false;
@@ -325,7 +336,7 @@ final class BotTaskHandler extends TaskHandler {
         _logActivity('Simulated utterance ($millis ms)');
         final clip = AudioClip(
             pcm: Int16List(millis * AudioWireFormat.sampleRate ~/ 1000));
-        unawaited(_session?.handleUtterance(clip));
+        unawaited(_handleIncomingClip(clip));
       case ClearTranscriptUiCommand():
         _logActivity('Transcript cleared');
         unawaited(_session?.clearTranscript());
@@ -341,6 +352,12 @@ final class BotTaskHandler extends TaskHandler {
       case RetryBrainUiCommand():
         _logActivity('Retrying brain warm-up');
         unawaited(_session?.start());
+      case SetVoiceEnrollUiCommand(:final enabled):
+        _voiceEnrollActive = enabled;
+        if (!enabled) _lastEnrollTranscript = '';
+        _logActivity('Voice enroll ${enabled ? 'on' : 'off'}');
+      case SaveVoiceEnrollUiCommand(:final overlayJson):
+        unawaited(_saveVoiceEnroll(overlayJson));
     }
     _pushSnapshot(force: true);
   }
@@ -356,10 +373,13 @@ final class BotTaskHandler extends TaskHandler {
     final now = DateTime.now();
     _markInbound(now);
     final started = message.isUtteranceStart || !_receivingUtterance;
-    if (started) {
+    if (started && !_voiceEnrollActive) {
       _utteranceFirstArrival = now;
       Log.i(_tag, 'utterance started (seq ${message.sequence})');
       _session?.noteIncomingAudio();
+    } else if (started) {
+      _utteranceFirstArrival = now;
+      Log.i(_tag, 'enroll utterance started (seq ${message.sequence})');
     }
     _utteranceLastArrival = now;
     _reassembler.add(message);
@@ -409,11 +429,60 @@ final class BotTaskHandler extends TaskHandler {
         'utterance: ${result.framesReceived} rx / ${result.framesLost} lost, crc ${result.checksumHex}');
 
     if (result.pcm.isNotEmpty) {
-      unawaited(_session?.handleUtterance(AudioClip(pcm: result.pcm)));
-    } else {
+      unawaited(_handleIncomingClip(AudioClip(pcm: result.pcm)));
+    } else if (!_voiceEnrollActive) {
       _session?.cancelListening();
+    } else {
+      _recordEnrollTranscript('');
     }
     _pushSnapshot();
+  }
+
+  Future<void> _handleIncomingClip(AudioClip clip) async {
+    if (_voiceEnrollActive) {
+      await _transcribeEnroll(clip);
+      return;
+    }
+    await _session?.handleUtterance(clip);
+  }
+
+  Future<void> _transcribeEnroll(AudioClip clip) async {
+    String heard = '';
+    try {
+      heard = (await _hybrid?.transcribeOnly(clip))?.trim() ?? '';
+    } catch (e) {
+      Log.w(_tag, 'enroll transcribe failed: $e');
+    }
+    _recordEnrollTranscript(heard);
+  }
+
+  void _recordEnrollTranscript(String heard) {
+    _lastEnrollTranscript = heard;
+    _enrollSeq++;
+    if (heard.isEmpty) {
+      _logActivity('Enroll: (no transcript)');
+    } else {
+      _logActivity('Enroll: $heard');
+    }
+    _pushSnapshot(force: true);
+  }
+
+  Future<void> _saveVoiceEnroll(String overlayJson) async {
+    final overlay = FastIntentOverlay.decode(overlayJson);
+    if (overlay == null) {
+      Log.w(_tag, 'saveVoiceEnroll: overlay JSON rejected');
+      _voiceEnrollActive = false;
+      _pushSnapshot(force: true);
+      return;
+    }
+    final store = _fastIntentStore;
+    if (store != null) {
+      await store.save(overlay);
+    }
+    _hybrid?.overlay = overlay;
+    _voiceEnrollActive = false;
+    _logActivity('Voice enroll saved');
+    _pushSnapshot(force: true);
   }
 
   // --- telemetry ---
@@ -927,6 +996,10 @@ final class BotTaskHandler extends TaskHandler {
           ? transcript.sublist(transcript.length - 50)
           : transcript,
       activity: List.of(_activity),
+      voiceEnrollActive: _voiceEnrollActive,
+      lastEnrollTranscript: _lastEnrollTranscript,
+      enrollSeq: _enrollSeq,
+      voiceEnrollHasOverlay: _fastIntentStore?.hasOverlay ?? false,
     );
     FlutterForegroundTask.sendDataToMain(snapshot.toMap());
   }

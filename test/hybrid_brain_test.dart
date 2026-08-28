@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:cute_bot/companion/brain/bot_brain.dart';
 import 'package:cute_bot/companion/brain/clip_asr.dart';
 import 'package:cute_bot/companion/brain/fake_brain.dart';
+import 'package:cute_bot/companion/brain/fast_intent_enroll.dart';
+import 'package:cute_bot/companion/brain/fast_intent_overlay.dart';
 import 'package:cute_bot/companion/brain/hybrid_brain.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -156,6 +158,32 @@ void main() {
       ['get_battery()', 'express(low_battery)'],
     );
     expect(dispatched, ['get_battery', 'express']);
+  });
+
+  test('ASR overlay hit skips the inner brain', () async {
+    var innerTurns = 0;
+    final overlay = buildFastIntentOverlay([
+      const VoiceEnrollSample(
+        prompt: 'Pause the timer',
+        intent: FastIntentId.pauseTimer,
+        transcripts: [
+          'WAS THE TEMPER',
+          'pose the tamper',
+          'pros the tamper bzz',
+        ],
+      ),
+    ]);
+    final hybrid = HybridBrain(
+      inner: _CountingBrain(_inner(), onRespond: () => innerTurns++),
+      asr: _ScriptedAsr('WAS THE TEMPER BZZ'),
+      overlay: overlay,
+    );
+    await hybrid.warmUp();
+
+    final events = await hybrid.respond(_clip(), _emptyCtx()).toList();
+    expect(events.whereType<ToolCall>().single.name, 'pause_timer');
+    expect(innerTurns, 0);
+    expect(hybrid.lastLatency?.backend, 'nlp');
   });
 }
 

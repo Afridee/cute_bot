@@ -4,7 +4,9 @@
 import 'package:flutter/material.dart';
 
 import '../../design/design.dart';
+import '../bot_link.dart';
 import '../brain/brain_session.dart';
+import '../brain/fast_intent_enroll.dart';
 import '../brain/model_download.dart';
 import '../companion_controller.dart';
 import 'companion_setup.dart';
@@ -21,6 +23,15 @@ class CompanionSetupPage extends StatefulWidget {
 class _CompanionSetupPageState extends State<CompanionSetupPage> {
   /// User-chosen earlier step (Back). Null means "show the resolved step".
   CompanionSetupStep? _viewing;
+
+  int _enrollLine = 0;
+  late final List<List<String>> _enrollTakes =
+      List.generate(kVoiceEnrollScript.length, (_) => <String>[]);
+  int _lastEnrollSeq = 0;
+  bool _enrollSeqInited = false;
+  bool _enrollModeOn = false;
+  bool _enrollMiss = false;
+  bool _ingestScheduled = false;
 
   CompanionController get _c => widget.controller;
 
@@ -63,6 +74,93 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
   }
 
   @override
+  void dispose() {
+    if (_enrollModeOn) _c.setVoiceEnroll(false);
+    super.dispose();
+  }
+
+  void _syncEnrollMode(CompanionSetupStep step) {
+    final want = step == CompanionSetupStep.voiceEnroll;
+    if (want == _enrollModeOn) return;
+    _enrollModeOn = want;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _c.setVoiceEnroll(want);
+    });
+  }
+
+  void _ingestEnrollSnapshot() {
+    if (_display != CompanionSetupStep.voiceEnroll) return;
+    if (_ingestScheduled) return;
+    _ingestScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _ingestScheduled = false;
+      if (!mounted) return;
+      _ingestEnrollSnapshotNow();
+    });
+  }
+
+  void _ingestEnrollSnapshotNow() {
+    if (_display != CompanionSetupStep.voiceEnroll) return;
+    final s = _c.snapshot;
+    if (s == null) return;
+    if (!_enrollSeqInited) {
+      _lastEnrollSeq = s.enrollSeq;
+      _enrollSeqInited = true;
+      return;
+    }
+    if (s.enrollSeq <= _lastEnrollSeq) return;
+    _lastEnrollSeq = s.enrollSeq;
+    final text = s.lastEnrollTranscript.trim();
+    if (text.isEmpty) {
+      setState(() => _enrollMiss = true);
+      return;
+    }
+    setState(() {
+      _enrollTakes[_enrollLine].add(text);
+      _enrollMiss = false;
+    });
+    if (_enrollTakes[_enrollLine].length >= kVoiceEnrollTakesTarget) {
+      _advanceEnrollLine();
+    }
+  }
+
+  void _advanceEnrollLine() {
+    if (_enrollLine < kVoiceEnrollScript.length - 1) {
+      setState(() {
+        _enrollLine++;
+        _enrollMiss = false;
+      });
+      return;
+    }
+    _finishEnroll(skipped: false);
+  }
+
+  void _skipEnrollLine() {
+    if (_enrollTakes[_enrollLine].length < kVoiceEnrollSkipLineAfter) return;
+    _advanceEnrollLine();
+  }
+
+  void _finishEnroll({required bool skipped}) {
+    final samples = <VoiceEnrollSample>[];
+    for (var i = 0; i < kVoiceEnrollScript.length; i++) {
+      if (_enrollTakes[i].isEmpty) continue;
+      samples.add(VoiceEnrollSample(
+        prompt: kVoiceEnrollScript[i].prompt,
+        intent: kVoiceEnrollScript[i].intent,
+        transcripts: List.of(_enrollTakes[i]),
+      ));
+    }
+    if (samples.isNotEmpty) {
+      final overlay = buildFastIntentOverlay(samples);
+      _c.saveVoiceEnrollOverlay(overlay.encode());
+    }
+    if (skipped || samples.isEmpty) {
+      _c.skipVoiceEnroll();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final nd = context.nd;
     final step = _display;
@@ -85,6 +183,8 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
                 if (mounted) setState(() => _viewing = null);
               });
             }
+            _syncEnrollMode(_display);
+            _ingestEnrollSnapshot();
             return Padding(
               padding: const EdgeInsets.fromLTRB(
                 CuteBotSpace.lg,
@@ -142,6 +242,7 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
         CompanionSetupStep.oemKeepAlive => 'Allow autostart on this phone',
         CompanionSetupStep.cdmLink => 'Link the bot to Android',
         CompanionSetupStep.brain => 'Download the brain',
+        CompanionSetupStep.voiceEnroll => 'Teach it how you sound',
         CompanionSetupStep.done => 'Ready',
       };
 
@@ -176,6 +277,10 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
         CompanionSetupStep.brain =>
           'About 2.6 GB, once, stays on this phone. Use Wi-Fi. First time '
               'takes several minutes. After that, restarts only reload.',
+        CompanionSetupStep.voiceEnroll =>
+          'The bot’s ears turn your words into text. Your voice may come out '
+              'wrong. Say these lines so pause and timers still work. Use the '
+              'robot or Bot Simulator. Skip if the bot isn’t here.',
         CompanionSetupStep.done => 'Companion is ready.',
       };
 
@@ -213,6 +318,17 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
         ];
       case CompanionSetupStep.brain:
         return [_BrainProgress(controller: _c)];
+      case CompanionSetupStep.voiceEnroll:
+        return [
+          _VoiceEnrollPanel(
+            lineIndex: _enrollLine,
+            takeCount: _enrollTakes[_enrollLine].length,
+            connected: _c.snapshot?.linkState == BotLinkState.ready,
+            receiving: _c.snapshot?.receivingUtterance == true,
+            missed: _enrollMiss,
+            lastHeard: (_c.snapshot?.lastEnrollTranscript ?? '').trim(),
+          ),
+        ];
       default:
         return const [];
     }
@@ -320,9 +436,102 @@ class _CompanionSetupPageState extends State<CompanionSetupPage> {
         ];
       case CompanionSetupStep.brain:
         return const [];
+      case CompanionSetupStep.voiceEnroll:
+        return _voiceEnrollActions();
       case CompanionSetupStep.done:
         return const [];
     }
+  }
+
+  List<Widget> _voiceEnrollActions() {
+    final takes = _enrollTakes[_enrollLine].length;
+    return [
+      NdButton.secondary(
+        label: 'I’ll do this later',
+        expand: true,
+        onPressed: () => _finishEnroll(skipped: true),
+      ),
+      if (takes >= kVoiceEnrollSkipLineAfter) ...[
+        const SizedBox(height: CuteBotSpace.sm),
+        NdButton.ghost(
+          label: 'Skip this line',
+          expand: true,
+          onPressed: _skipEnrollLine,
+        ),
+      ],
+    ];
+  }
+}
+
+/// Voice-enroll instrument: the line to say is the one break (Doto).
+/// Line index is tertiary; takes are a 5-segment bar; status is bracket text.
+class _VoiceEnrollPanel extends StatelessWidget {
+  const _VoiceEnrollPanel({
+    required this.lineIndex,
+    required this.takeCount,
+    required this.connected,
+    required this.receiving,
+    required this.missed,
+    required this.lastHeard,
+  });
+
+  final int lineIndex;
+  final int takeCount;
+  final bool connected;
+  final bool receiving;
+  final bool missed;
+  final String lastHeard;
+
+  @override
+  Widget build(BuildContext context) {
+    final nd = context.nd;
+    final prompt = kVoiceEnrollScript[lineIndex].prompt;
+    final lineLabel =
+        '${(lineIndex + 1).toString().padLeft(2, '0')} / '
+        '${kVoiceEnrollScript.length.toString().padLeft(2, '0')}';
+    final takes = takeCount.clamp(0, kVoiceEnrollTakesTarget);
+
+    return Padding(
+      padding: const EdgeInsets.only(top: CuteBotSpace.xxl),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const NdLabel('Line'),
+              const Spacer(),
+              Text(lineLabel, style: nd.typography.label),
+            ],
+          ),
+          const SizedBox(height: CuteBotSpace.md),
+          Text(prompt, style: nd.typography.displayMd),
+          const SizedBox(height: CuteBotSpace.md),
+          NdSegmentedProgress(
+            value: takes / kVoiceEnrollTakesTarget,
+            segments: kVoiceEnrollTakesTarget,
+          ),
+          const SizedBox(height: CuteBotSpace.md),
+          if (!connected)
+            const NdStatusText('[WAITING]')
+          else if (receiving)
+            const NdStatusText('[LISTENING]')
+          else if (missed)
+            const NdStatusText('[MISSED]', color: CuteBotSignal.warning)
+          else
+            Text(
+              'Hold-to-talk on the robot or Bot Simulator.',
+              style: nd.typography.body
+                  .copyWith(color: nd.colors.textSecondary),
+            ),
+          if (lastHeard.isNotEmpty) ...[
+            const SizedBox(height: CuteBotSpace.lg),
+            const NdLabel('Heard'),
+            const SizedBox(height: CuteBotSpace.xs),
+            Text(lastHeard, style: nd.typography.data),
+          ],
+        ],
+      ),
+    );
   }
 }
 
