@@ -1,0 +1,37 @@
+---
+description: Keep the BLE bot contract ESP32-portable — the simulator is not a special peer
+alwaysApply: true
+---
+
+# ESP32 ↔ simulator parity
+
+The companion talks to one kind of bot. The Android **Bot Simulator** is a stand-in for **ESP32 firmware**, not a second protocol. Firmware is not in this repo; the contract is `lib/shared/ble_protocol.dart`. If the simulator can do it over BLE, a real bot with correct firmware must be able to do it too.
+
+## Non-negotiable
+
+- Do **not** add companion behavior that only the simulator can satisfy (extra GATT chars, simulator-only notify payloads, pixel frames, Flutter-only face commands).
+- Do **not** branch on "is simulator" vs "is ESP32". Same scan, MTU, writes, notifies, and probes.
+- New bot capabilities go through the existing characteristics and frame types, or an **explicit additive addendum** in `ble_protocol.dart` (control plane is frozen after M0 — call out any break).
+- Keep `ble_protocol.dart`, `adpcm.dart`, and `audio_transport.dart` dependency-free (`dart:typed_data` only) so firmware can port them.
+- The visor (`lib/bot_simulator/visor/`) is the OLED reference. The phone sends compact actuators; firmware renders locally. Never stream a framebuffer. v1 face hardware: **0.96″ 128×64 SSD1306, 4-pin I2C** (see `Docs/hardware-guide.md`).
+
+## When you change X, also update Y
+
+| Change | Also |
+|---|---|
+| New `ControlCommandId` / payload | Simulator handler + `Docs/hardware-guide.md` firmware table. Optional actuators: **ACK and ignore**, never an ATT error (companion reconnects on failed write-with-response). |
+| New `express` mood or LED signature | `expressions.dart` + `bot_body.dart` `ledColor` **and** `mood_from_led.dart` (keep lockstep). Add a visor pose if the face should look distinct. |
+| Happy vs delighted | Same LED; delighted is **wiggle after LED**. Firmware with no servo still ACKs `wiggle()` and uses that ordering. |
+| Mic / speaker / framing | IMA ADPCM, 16 kHz, start/end flags, frames ≤ MTU−3. Receivers accept any even sample count. ESP32 **mutes the mic while `audioToBot` is in flight** (no AEC). |
+| Captions | `show_text` UTF-8. Prefer ASCII (OLED fonts). ACK even if firmware skips rendering. |
+| Battery | `get_battery` → telemetry **notify** in ≤ 1 s (liveness probe). |
+
+Phone-only features (Gemma, ASR, timers, CDM, phone-alert *generation*) stay on the companion. They may **actuate** the bot only via the wire table above.
+
+## Simulator-only (do not require of ESP32)
+
+Hold-to-talk UI, Tech view, chat history, fake 87% battery, Android AEC, neon/color glow. Desk bot: VAD instead of PTT, **0.96″ 128×64 SSD1306 I2C** OLED, no servo in v1.
+
+## Before merging bot/BLE/face changes
+
+Ask: would ESP32 firmware that only implements `ble_protocol.dart` + the hardware-guide table still work, without a companion special case?

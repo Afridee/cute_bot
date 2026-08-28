@@ -169,8 +169,9 @@ void main() {
     });
 
     test('systemMoodForBrainState maps lifecycle to catalog moods', () {
-      expect(systemMoodForBrainState(BrainSessionState.thinking),
-          BotMood.curious);
+      // Thinking is no longer a catalog mood: BotService sends the
+      // reserved purple-breathe wire signature directly.
+      expect(systemMoodForBrainState(BrainSessionState.thinking), isNull);
       expect(systemMoodForBrainState(BrainSessionState.warming),
           BotMood.sleepy);
       expect(systemMoodForBrainState(BrainSessionState.ready), isNull);

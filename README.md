@@ -115,7 +115,7 @@ arriving off the radio flow straight into a strictly serialized conversation
 queue (the LiteRT-LM one-conversation rule, enforced from day one); every
 transcript line persists on append via flutter_foreground_task's store, and
 on restart the session reloads the transcript, re-warms, and shows warming
-state on the bot's LEDs (breathing blue) while it does. Kill → restart →
+state on the bot's OLED face (breathing blue) while it does. Kill → restart →
 re-warm is handled as a normal lifecycle: START_STICKY + `allowAutoRestart`
 cover system kills, `autoRunOnBoot` covers reboot, and the UI — now a thin
 client — just renders `ServiceSnapshot`s pushed over the task channel and
@@ -238,7 +238,8 @@ two-phone TTS / timer / battery human bar (passed).
   mic the same way). Hold-to-talk during playback does not start a
   new companion turn.
 - Simulator battery telemetry is faked (87%, 3970 mV).
-- `show_text` is a simulator subtitle. The companion still sends a
+- `show_text` carries UTF-8 captions for the simulator screen and the desk
+  bot's OLED (e.g. `thinking…`, tool lines). The companion still sends a
   **final** caption (and streams only if TTS failed) with
   `reconnectOnWriteFailure: false`. Firmware must ACK unknown / optional
   control ids — an ATT error reconnects the phone. See the firmware table
@@ -276,7 +277,7 @@ two-phone TTS / timer / battery human bar (passed).
   the UI grants permissions before the service starts. Confirmed on
   device: the bot replies with only the foreground service running
   (M3 / M2.5).
-- The service's warming/thinking LED expressions assume the bot is connected;
+- The service's warming/thinking face expressions assume the bot is connected;
   a bot that reconnects mid-state gets a re-send, but a bot that was never
   connected during warm-up simply misses the show. Harmless, revisit with
   real hardware.

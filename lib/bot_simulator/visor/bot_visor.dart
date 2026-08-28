@@ -107,7 +107,60 @@ class _BotVisorState extends State<BotVisor>
   FacePose _idle(FacePose pose, VisorMood mood, double t) {
     switch (mood) {
       case VisorMood.neutral:
-        return pose; // Blink alone carries the resting face.
+        // Slow two-frequency wander so the resting face drifts and
+        // occasionally seems to glance around instead of freezing.
+        final wander = Offset(
+          0.05 * math.sin(t * 0.5) + 0.04 * math.sin(t * 0.17 + 2.1),
+          0.03 * math.sin(t * 0.8 + 0.7),
+        );
+        return _offsetBoth(pose, wander);
+      case VisorMood.thinking:
+        // Pondering gaze: fixate on a spot, hold with tiny micro-drift,
+        // then dart (saccade, ~120 ms) to the next one. Hold lengths are
+        // deliberately uneven so the loop never feels metronomic.
+        const durations = [1.5, 1.1, 1.8, 0.9, 1.6, 1.2];
+        const targets = [
+          Offset(-0.34, -0.24), // up-left
+          Offset(0.04, -0.34), // up-center
+          Offset(0.30, -0.28), // up-right
+          Offset(-0.28, -0.30), // back up-left
+          Offset(0.06, 0.16), // brief downward "concluding" glance
+          Offset(0.26, -0.22), // up-right again
+        ];
+        final period = durations.reduce((a, b) => a + b);
+        var phase = t % period;
+        var seg = 0;
+        while (phase >= durations[seg]) {
+          phase -= durations[seg];
+          seg++;
+        }
+        final prev = targets[(seg + targets.length - 1) % targets.length];
+        const saccadeSeconds = 0.12;
+        final dart = Curves.easeOutCubic
+            .transform((phase / saccadeSeconds).clamp(0.0, 1.0));
+        final drift = Offset(
+          0.020 * math.sin(t * 0.7) + 0.014 * math.sin(t * 1.9 + 1.3),
+          0.016 * math.sin(t * 1.1 + 0.5),
+        );
+        final look = Offset.lerp(prev, targets[seg], dart)! + drift;
+        // Slow concentration squint on top of the asymmetric base pose,
+        // slightly out of phase per eye.
+        final squintL = 1.0 + 0.05 * math.sin(t * 0.9);
+        final squintR = 1.0 + 0.05 * math.sin(t * 0.9 + 0.8);
+        final bob = Offset(0, 0.03 * math.sin(t * 1.3));
+        return pose.copyWith(
+          left: pose.left.copyWith(
+            pupilOffset: look,
+            squash: pose.left.squash * squintL,
+            offset: pose.left.offset + bob,
+          ),
+          right: pose.right.copyWith(
+            pupilOffset: look,
+            squash: pose.right.squash * squintR,
+            offset: pose.right.offset + bob,
+          ),
+          dotPhase: (t / 1.4) % 1.0,
+        );
       case VisorMood.curious:
         final look = Offset(
           0.30 + 0.14 * math.sin(t * 0.9),

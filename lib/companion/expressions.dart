@@ -150,9 +150,10 @@ ExpressionSpec? expressionFor(Object? mood) {
 }
 
 /// Phone-only lifecycle faces. Not exposed to Gemma — maps brain state to
-/// an existing catalog row while warming or inferencing.
+/// an existing catalog row while warming. Thinking is not a catalog mood:
+/// BotService sends its dedicated wire signature (purple breathe) so the
+/// bot can show a distinct processing animation.
 BotMood? systemMoodForBrainState(BrainSessionState state) => switch (state) {
-      BrainSessionState.thinking => BotMood.curious,
       BrainSessionState.warming => BotMood.sleepy,
       _ => null,
     };

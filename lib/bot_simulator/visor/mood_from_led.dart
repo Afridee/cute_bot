@@ -52,6 +52,9 @@ VisorMood visorMoodForLed({
     ('yellow', LedPattern.blink) => VisorMood.startled,
     ('yellow', LedPattern.solid) => VisorMood.proud,
     ('purple', LedPattern.blink) => VisorMood.confused,
+    // System lifecycle signature — the companion sends this while the
+    // brain is processing an utterance (not a model-expressible mood).
+    ('purple', LedPattern.breathe) => VisorMood.thinking,
     ('blue', LedPattern.breathe) => VisorMood.sleepy,
     ('blue', LedPattern.solid) => VisorMood.sad,
     ('orange', LedPattern.blink) => VisorMood.annoyed,

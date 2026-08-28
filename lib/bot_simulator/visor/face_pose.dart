@@ -11,6 +11,7 @@ import 'dart:ui';
 /// so the simulator (bot side) does not import companion brain code.
 enum VisorMood {
   neutral,
+  thinking,
   curious,
   happy,
   delighted,
@@ -160,6 +161,8 @@ final class FacePose {
     required this.right,
     required this.color,
     this.battery = 0.0,
+    this.thoughtDots = 0.0,
+    this.dotPhase = 0.0,
   });
 
   final EyePose left;
@@ -169,17 +172,27 @@ final class FacePose {
   /// Opacity of the low-battery icon in the visor corner.
   final double battery;
 
+  /// Opacity of the "..." thought ellipsis (thinking mood).
+  final double thoughtDots;
+
+  /// 0..1 cycle position driving the sequential dot pulse.
+  final double dotPhase;
+
   FacePose copyWith({
     EyePose? left,
     EyePose? right,
     Color? color,
     double? battery,
+    double? thoughtDots,
+    double? dotPhase,
   }) {
     return FacePose(
       left: left ?? this.left,
       right: right ?? this.right,
       color: color ?? this.color,
       battery: battery ?? this.battery,
+      thoughtDots: thoughtDots ?? this.thoughtDots,
+      dotPhase: dotPhase ?? this.dotPhase,
     );
   }
 
@@ -189,6 +202,8 @@ final class FacePose {
       right: EyePose.lerp(a.right, b.right, t),
       color: Color.lerp(a.color, b.color, t)!,
       battery: a.battery + (b.battery - a.battery) * t,
+      thoughtDots: a.thoughtDots + (b.thoughtDots - a.thoughtDots) * t,
+      dotPhase: a.dotPhase + (b.dotPhase - a.dotPhase) * t,
     );
   }
 
@@ -201,6 +216,7 @@ final class FacePose {
 const Color _cyan = Color(0xFF3ADCFF);
 const Color _pink = Color(0xFFFF6EC7);
 const Color _red = Color(0xFFFF4A3D);
+const Color _purple = Color(0xFFB57CFF);
 
 const EyePose _happyArc = EyePose(
   centerAngle: -math.pi / 2,
@@ -224,6 +240,25 @@ final Map<VisorMood, FacePose> _catalog = {
     left: _disc.copyWith(radius: 0.82, squash: 0.95),
     right: _disc.copyWith(radius: 0.82, squash: 0.95),
     color: _cyan,
+  ),
+  VisorMood.thinking: FacePose(
+    // Concentrating: narrowed asymmetric eyes fixated up-left, one brow
+    // faintly furrowed, thought ellipsis on.
+    left: _disc.copyWith(
+      radius: 0.88,
+      squash: 0.68,
+      pupil: 1.0,
+      pupilOffset: const Offset(-0.30, -0.22),
+      brow: 0.5,
+    ),
+    right: _disc.copyWith(
+      radius: 0.88,
+      squash: 0.82,
+      pupil: 1.0,
+      pupilOffset: const Offset(-0.30, -0.22),
+    ),
+    color: _purple,
+    thoughtDots: 1.0,
   ),
   VisorMood.curious: FacePose(
     left: _disc.copyWith(

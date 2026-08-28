@@ -108,6 +108,15 @@ final class BotTaskHandler extends TaskHandler {
   Timer? _pendingSnapshot;
 
   BrainSessionState? _lastExpressedBrainState;
+
+  // Expression decay: a turn's mood lingers briefly after the brain goes
+  // back to ready, then relaxes to the neutral resting face; if nothing
+  // else happens the bot eventually dozes off. Keeps the face lively
+  // instead of frozen on the last express() forever.
+  static const Duration _expressionHold = Duration(seconds: 8);
+  static const Duration _dozeAfterIdle = Duration(seconds: 60);
+  Timer? _expressionDecay;
+
   BrainSessionState? _lastCaptionBrainState;
   DateTime _lastCaptionAt = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _pendingCaption;
@@ -249,6 +258,7 @@ final class BotTaskHandler extends TaskHandler {
     _pendingNotification?.cancel();
     _pendingCaption?.cancel();
     _phoneAlertRestore?.cancel();
+    _expressionDecay?.cancel();
     _utteranceIdle?.cancel();
     for (final t in _dartTimers.values) {
       t.cancel();
@@ -441,21 +451,19 @@ final class BotTaskHandler extends TaskHandler {
     if (session.state != _lastExpressedBrainState) {
       _lastExpressedBrainState = session.state;
       _expressBrainState(session.state, hadError: session.lastError != null);
+      _scheduleExpressionDecay(session.state);
     }
     _pushCaption(session);
     _updateNotification();
     _pushSnapshot();
   }
 
-  /// Optional subtitle for a display bot (simulator). Speaker-only ESP32
-  /// firmware ACKs and ignores [ShowTextCommand]. Mute path: the caption
-  /// is the compact tool line (`express(delighted)`), not speech.
+  /// Caption for a display bot (simulator or desk-bot OLED). Firmware without
+  /// a screen ACKs and ignores [ShowTextCommand]. Mute path: the caption is
+  /// the compact tool line (`express(delighted)` / `thinking…`), not speech.
   void _pushCaption(BrainSession session) {
     if (session.state == BrainSessionState.thinking) {
-      final mood = systemMoodForBrainState(session.state);
-      if (mood != null) {
-        _sendCaption(mood.name, isFinal: false);
-      }
+      _sendCaption('thinking…', isFinal: false);
     }
     if (session.state == BrainSessionState.responding &&
         session.responseText.isNotEmpty) {
@@ -530,6 +538,22 @@ final class BotTaskHandler extends TaskHandler {
       _body?.showMood(mood, labelPrefix: 'system', quiet: true);
       return;
     }
+    if (state == BrainSessionState.thinking) {
+      // Not a catalog mood (BotMood is the express() tool schema). Purple
+      // breathe is the reserved lifecycle signature the visor renders as
+      // its dedicated "thinking" animation.
+      _sendControl(
+          SetLedCommand(
+            sequence: _controlSeq.next(),
+            red: 160,
+            green: 0,
+            blue: 255,
+            pattern: LedPattern.breathe,
+          ),
+          'led thinking',
+          quiet: true);
+      return;
+    }
     if (state == BrainSessionState.responding ||
         state == BrainSessionState.ready) {
       return;
@@ -550,6 +574,44 @@ final class BotTaskHandler extends TaskHandler {
         ),
         'led ${state.name}',
         quiet: true);
+  }
+
+  /// Once the brain settles on ready, let the turn's expression linger for
+  /// [_expressionHold], then relax to neutral (LED off → resting face);
+  /// after [_dozeAfterIdle] more of silence, doze off to sleepy. Any state
+  /// change (new utterance, cue, warming) cancels the decay so a fresh
+  /// expression is never cut short.
+  void _scheduleExpressionDecay(BrainSessionState state) {
+    _expressionDecay?.cancel();
+    _expressionDecay = null;
+    if (state != BrainSessionState.ready) return;
+    _expressionDecay = Timer(_expressionHold, () {
+      if (_session?.state != BrainSessionState.ready) return;
+      _sendControl(
+          SetLedCommand(
+            sequence: _controlSeq.next(),
+            red: 0,
+            green: 0,
+            blue: 0,
+            pattern: LedPattern.off,
+          ),
+          'led idle',
+          quiet: true);
+      _expressionDecay = Timer(_dozeAfterIdle, () {
+        if (_session?.state != BrainSessionState.ready) return;
+        // Raw LED (no showMood): dozing off should not purr out loud.
+        _sendControl(
+            SetLedCommand(
+              sequence: _controlSeq.next(),
+              red: 0,
+              green: 60,
+              blue: 255,
+              pattern: LedPattern.breathe,
+            ),
+            'led doze',
+            quiet: true);
+      });
+    });
   }
 
   /// Tool calls from the brain, mapped onto BLE / timers / battery.
@@ -658,6 +720,9 @@ final class BotTaskHandler extends TaskHandler {
       final session = _session;
       if (session == null) return;
       _expressBrainState(session.state, hadError: session.lastError != null);
+      // On ready the call above leaves the alert LED as-is; restart the
+      // decay so the alert face still relaxes back to neutral.
+      _scheduleExpressionDecay(session.state);
     });
   }
 

@@ -27,8 +27,37 @@ class FacePainter extends CustomPainter {
     _paintEye(canvas, pose.left, leftCenter, r, glow: false);
     _paintEye(canvas, pose.right, rightCenter, r, glow: false);
 
+    if (pose.thoughtDots > 0.01) {
+      _paintThoughtDots(canvas, size, r, glow: true);
+      _paintThoughtDots(canvas, size, r, glow: false);
+    }
+
     if (pose.battery > 0.01) {
       _paintBattery(canvas, size, r);
+    }
+  }
+
+  /// Comic thought-bubble ellipsis: three dots rising toward the upper
+  /// right, pulsing one after another as [FacePose.dotPhase] cycles.
+  void _paintThoughtDots(Canvas canvas, Size size, double baseR,
+      {required bool glow}) {
+    const positions = [
+      Offset(0.46, 0.32),
+      Offset(0.52, 0.24),
+      Offset(0.585, 0.155),
+    ];
+    for (var i = 0; i < positions.length; i++) {
+      // Each dot peaks a third of a cycle after the previous one.
+      final local = (pose.dotPhase - i / 3.0) % 1.0;
+      final wave = math.cos(local * math.pi * 2);
+      final pulse = wave > 0 ? wave * wave : 0.0;
+      final alpha = pose.thoughtDots * (0.30 + 0.70 * pulse);
+      final radius = baseR * (0.11 + 0.02 * i) * (0.85 + 0.30 * pulse);
+      canvas.drawCircle(
+        Offset(size.width * positions[i].dx, size.height * positions[i].dy),
+        radius,
+        _fillPaint(pose.color, alpha, radius * 1.6, glow: glow),
+      );
     }
   }
 

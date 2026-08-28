@@ -13,18 +13,21 @@
 ///
 /// ADDENDUM (M3 caption, additive): [ControlCommandId.showText] (0x05)
 /// carries a UTF-8 caption on the existing control characteristic. UUIDs,
-/// header, and existing command encodings are unchanged. This is a
-/// simulator subtitle, not a product surface — the desk robot has no
-/// screen. TTS on [BotUuids.audioToBot] is the real mouth.
+/// header, and existing command encodings are unchanged. Used on the Bot
+/// Simulator screen and on the desk robot's **0.96″ 128×64 SSD1306** OLED
+/// (status line or subtitle under the visor; see `Docs/hardware-guide.md`).
+/// The mute bot has no TTS mouth — captions are visual, not spoken.
 ///
 /// ADDENDUM (ESP32 parity): unknown control command ids MUST be accepted
 /// at the ATT layer and ignored ([IgnoredControlCommand]). Never return
 /// an ATT error for an unknown id — the companion treats a failed
 /// write-with-response as a dead link and reconnects. Same rule for
 /// optional actuators the firmware does not have: [ControlCommandId.wiggle]
-/// is a no-op with no servo; [ControlCommandId.showText] is a no-op with
-/// no display. Known commands that the companion actually depends on
-/// (set_led, play_sound, get_battery, audio both ways) must work.
+/// is a no-op with no servo; [ControlCommandId.showText] is a no-op only
+/// when firmware has no display. Known commands that the companion actually
+/// depends on (set_led, play_sound, get_battery, audio both ways) must work.
+/// On v1 hardware the OLED face is driven locally from [SetLedCommand]
+/// mood signatures — see `Docs/hardware-guide.md`.
 ///
 /// ## Roles
 ///
@@ -329,8 +332,8 @@ abstract final class ControlCommandId {
   static const int playSound = 0x03;
   static const int getBattery = 0x04;
 
-  /// UTF-8 caption for a display (simulator screen). Optional: speaker-only
-  /// bots ACK and ignore. Not a substitute for TTS on [BotUuids.audioToBot].
+  /// UTF-8 caption for a display (simulator screen or desk-bot OLED).
+  /// Optional on firmware without a screen: ACK and ignore. Not speech.
   static const int showText = 0x05;
 }
 
@@ -424,6 +427,11 @@ sealed class ControlMessage extends BotMessage {
   }
 }
 
+/// Mood signature for the OLED visor face. Firmware reverse-maps
+/// (r, g, b, pattern) to a visor mood and runs the local eye engine —
+/// same signatures as `lib/bot_simulator/visor/mood_from_led.dart`. The RGB
+/// bytes are the wire encoding, not separate RGB LED pixels on v1 hardware.
+///
 /// Args: [r u8][g u8][b u8][pattern u8].
 final class SetLedCommand extends ControlMessage {
   const SetLedCommand({
@@ -525,6 +533,7 @@ final class IgnoredControlCommand extends ControlMessage {
 ///
 /// Payload is raw UTF-8 so this file stays `dart:typed_data` only. Empty
 /// text is legal (a final with no bytes just commits whatever was streaming).
+/// Render on the OLED when present (`thinking…`, tool lines, etc.).
 final class ShowTextCommand extends ControlMessage {
   const ShowTextCommand({
     required super.sequence,
@@ -641,7 +650,7 @@ final class BatteryStatusMessage extends TelemetryMessage {
   }
 }
 
-/// Coarse bot state, mirrored to LEDs/face on real hardware. Also lets the
+/// Coarse bot state, mirrored to the OLED face on real hardware. Also lets the
 /// half-duplex rule (mic muted while speaking — see "Echo" in the brief)
 /// be protocol-visible instead of an accident of buffering.
 enum BotState {
