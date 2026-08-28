@@ -35,8 +35,9 @@ final List<Tool> kBotTools = [
   Tool(
     name: 'set_timer',
     description:
-        'Start a countdown on the phone. When it fires the robot will '
-        'express alarm. Pending timers survive a service restart.',
+        'Start a countdown on the phone. The phone confirms with a yes '
+        'expression, and the robot will express alarm when it fires. '
+        'Pending timers survive a service restart.',
     parameters: {
       'type': 'object',
       'properties': {

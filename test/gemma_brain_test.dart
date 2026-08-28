@@ -166,6 +166,13 @@ void main() {
       expect(kPersonaMaxOutputTokens, 192);
       expect(kPersonaMaxOutputTokens, greaterThanOrEqualTo(128));
     });
+
+    test('system prompt lists every BotMood', () {
+      for (final mood in BotMood.values) {
+        expect(kPersonaSystemInstruction, contains(mood.name),
+            reason: mood.name);
+      }
+    });
   });
 
   group('parseLeakedToolCalls', () {

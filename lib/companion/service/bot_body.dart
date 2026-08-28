@@ -175,6 +175,10 @@ final class BotBody {
       });
     }
     Log.i(_tag, 'timer ${timer.id} armed: ${timer.minutes}m "${timer.label}"');
+    // Deterministic ack. `set_timer` is terminal for the model (no second
+    // decode after it), so the phone confirms instead of trusting the model
+    // to chain express(yes) in the same turn.
+    showMood(BotMood.yes, labelPrefix: 'tool set_timer');
     return ToolInvokeResult(
       {
         'status': 'ok',
