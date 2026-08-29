@@ -74,7 +74,7 @@ class ModeSelectPage extends StatelessWidget {
               const SizedBox(height: CuteBotSpace.xxxxl),
               _ModeRow(
                 title: 'Companion',
-                subtitle: 'The brain: connects to the bot (central)',
+                subtitle: 'The brain: connects to the desk bot or simulator',
                 onTap: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => const CompanionPage(),

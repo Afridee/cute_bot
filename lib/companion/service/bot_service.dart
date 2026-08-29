@@ -27,12 +27,15 @@ import '../bot_link.dart';
 import '../brain/bot_brain.dart';
 import '../brain/brain_session.dart';
 import '../brain/fake_brain.dart';
+import '../brain/fast_intent_overlay.dart';
 import '../brain/gemma_brain.dart';
+import '../brain/hybrid_brain.dart';
+import '../brain/sherpa_clip_asr.dart';
 import '../brain/transcript.dart';
-import '../voice/flutter_tts_voice.dart';
-import '../voice/speech_out.dart';
-import '../voice/voice.dart';
+import '../debug_flags.dart';
+import '../expressions.dart';
 import 'bot_body.dart';
+import 'fast_intent_store.dart';
 import 'notification_text.dart';
 import 'service_ipc.dart';
 import 'task_storage.dart';
@@ -52,10 +55,10 @@ final class BotTaskHandler extends TaskHandler {
   BrainSession? _session;
   TranscriptStore? _transcript;
   GemmaBrain? _gemma;
+  HybridBrain? _hybrid;
   BotBody? _body;
   TimerStore? _timerStore;
-  ReplySpeaker? _speaker;
-  Voice? _voice;
+  FastIntentStore? _fastIntentStore;
   final Map<String, Timer> _dartTimers = {};
   Completer<({int percent, int millivolts, bool charging})>? _batteryWaiter;
   late UtteranceReassembler _reassembler;
@@ -65,7 +68,7 @@ final class BotTaskHandler extends TaskHandler {
   final DateTime _startedAt = DateTime.now();
 
   // Audio diagnostics (same numbers the M1 debug panel showed).
-  bool _liveMonitor = true;
+  bool _liveMonitor = kLiveMonitorDefault;
   bool _playbackReady = false;
   bool _receivingUtterance = false;
   DateTime? _utteranceFirstArrival;
@@ -93,6 +96,10 @@ final class BotTaskHandler extends TaskHandler {
   static const String _phoneAlertsKey = 'phoneAlertsEnabled';
   bool _phoneAlertsEnabled = true;
 
+  bool _voiceEnrollActive = false;
+  String _lastEnrollTranscript = '';
+  int _enrollSeq = 0;
+
   /// Actuation debounce on top of the listener's 3 s forward debounce: a
   /// burst of alerts becomes one blink+chirp, not a BLE flood.
   static const Duration _minPhoneAlertGap = Duration(seconds: 5);
@@ -109,11 +116,17 @@ final class BotTaskHandler extends TaskHandler {
   Timer? _pendingSnapshot;
 
   BrainSessionState? _lastExpressedBrainState;
-  BrainSessionState? _lastCaptionBrainState;
-  BrainSessionState? _lastSpeakerBrainState;
-  DateTime _lastCaptionAt = DateTime.fromMillisecondsSinceEpoch(0);
-  Timer? _pendingCaption;
-  static const Duration _minCaptionGap = Duration(milliseconds: 200);
+
+  // Expression decay: a turn's mood lingers briefly after the brain goes
+  // back to ready, then relaxes to the neutral resting face; if nothing
+  // else happens the bot eventually dozes off. Keeps the face lively
+  // instead of frozen on the last express() forever.
+  static const Duration _expressionHold = Duration(seconds: 8);
+  static const Duration _dozeAfterIdle = Duration(seconds: 60);
+  Timer? _expressionDecay;
+
+  /// 1 Hz OLED timer countdown (`show_text` on the face is timer-only).
+  Timer? _timerCaptionTicker;
 
   // Notification throttle: change-only, capped at one update per gap with a
   // trailing update so the final state always lands (same pattern as
@@ -149,6 +162,8 @@ final class BotTaskHandler extends TaskHandler {
     _transcript = TranscriptStore(const TaskKeyValueStore());
     _timerStore = TimerStore(const TaskKeyValueStore());
     await _timerStore!.load();
+    _fastIntentStore = FastIntentStore(const TaskKeyValueStore());
+    await _fastIntentStore!.load();
     _body = BotBody(
       timers: _timerStore!,
       sendControl: _sendControl,
@@ -157,31 +172,44 @@ final class BotTaskHandler extends TaskHandler {
     );
 
     // CUTEBOT_FAKE_BRAIN=true keeps M2's canned brain for one-phone tests
-    // that must not download 2.6 GB. Default is Gemma 4 E2B.
+    // that must not download 2.6 GB. Default is Gemma 4 E2B. HybridBrain
+    // sits in front either way: ASR + formulaic intents skip the model.
     const useFake = bool.fromEnvironment('CUTEBOT_FAKE_BRAIN');
-    final BotBrain brain;
+    final BotBrain inner;
     if (useFake) {
-      Log.i(_tag, 'brain: FakeBrain (CUTEBOT_FAKE_BRAIN)');
-      brain = FakeBrain();
+      Log.i(_tag, 'brain: FakeBrain + NLP (CUTEBOT_FAKE_BRAIN)');
+      inner = FakeBrain();
     } else {
       _gemma = GemmaBrain(
         onChanged: () => _pushSnapshot(),
         executeTool: _executeTool,
       );
-      brain = _gemma!;
-      Log.i(_tag, 'brain: Gemma 4 E2B');
+      inner = _gemma!;
+      Log.i(_tag, 'brain: Gemma 4 E2B + NLP');
     }
+    _hybrid = HybridBrain(
+      inner: inner,
+      executeTool: _executeTool,
+      asr: SherpaClipAsr(),
+      overlay: _fastIntentStore?.overlay,
+      onHeard: (text) => _logActivity('Heard: $text'),
+      onRoute: ({required fastIntent, text, reason}) {
+        if (fastIntent) {
+          _logActivity('Fast intent (${reason ?? '?'})');
+        } else if (text != null && text.isNotEmpty) {
+          _logActivity('LLM');
+        } else {
+          _logActivity('LLM (no transcript)');
+        }
+      },
+    );
     _session = BrainSession(
-      brain: brain,
+      brain: _hybrid!,
       transcript: _transcript!,
       onToolCall: (call) {
         _logActivity('Tool call: $call');
-        // FakeBrain has no executor inside respond(); GemmaBrain already
-        // awaited _executeTool before yielding the ToolCall.
-        if (useFake) {
-          unawaited(_executeTool(
-              call.name, Map<String, dynamic>.from(call.arguments)));
-        }
+        // GemmaBrain already awaited _executeTool before yielding ToolCall.
+        // FakeBrain / NLP: HybridBrain.executeTool handles dispatch.
       },
     )..addListener(_onBrainChanged);
 
@@ -216,7 +244,7 @@ final class BotTaskHandler extends TaskHandler {
     }
 
     await _link!.start();
-    unawaited(_bringUpVoice(useFake: useFake));
+    // Mute: no TTS. BLE audio-out stays for a later play_song tool.
     // Warm-up runs while the link connects; restore timers after the brain
     // is ready so a due timer enters the conversation queue, not a drop.
     unawaited(() async {
@@ -224,29 +252,6 @@ final class BotTaskHandler extends TaskHandler {
       _restoreTimers();
     }());
     _pushSnapshot(force: true);
-  }
-
-  Future<void> _bringUpVoice({required bool useFake}) async {
-    try {
-      final voice = useFake ? FakeVoice() : FlutterTtsVoice();
-      await voice.warmUp();
-      _voice = voice;
-      _speaker = ReplySpeaker(
-        voice: voice,
-        sendFrame: (frame) {
-          final link = _link;
-          if (link == null || link.state != BotLinkState.ready) return;
-          link.sendAudioFrame(frame);
-        },
-        mtu: () => _link?.mtu ?? 23,
-        queuedFrames: () => _link?.queuedAudioFrames ?? 0,
-        onSpeakingChanged: _onBotSpeaking,
-      );
-      Log.i(_tag, 'voice ready (${useFake ? 'FakeVoice' : 'FlutterTtsVoice'})');
-    } catch (e, stack) {
-      Log.e(_tag, 'TTS warm-up failed; captions only', e, stack);
-      _logActivity('TTS unavailable: $e');
-    }
   }
 
   @override
@@ -264,8 +269,10 @@ final class BotTaskHandler extends TaskHandler {
     Log.w(_tag, 'service destroyed (timeout: $isTimeout)');
     _pendingSnapshot?.cancel();
     _pendingNotification?.cancel();
-    _pendingCaption?.cancel();
+    _timerCaptionTicker?.cancel();
+    _timerCaptionTicker = null;
     _phoneAlertRestore?.cancel();
+    _expressionDecay?.cancel();
     _utteranceIdle?.cancel();
     for (final t in _dartTimers.values) {
       t.cancel();
@@ -278,12 +285,11 @@ final class BotTaskHandler extends TaskHandler {
     _reassembler.reset();
     _session?.dispose();
     _session = null;
+    _hybrid = null;
     _gemma = null;
     _body = null;
     _timerStore = null;
-    unawaited(_voice?.dispose());
-    _voice = null;
-    _speaker = null;
+    _fastIntentStore = null;
     _link?.dispose();
     _link = null;
     _bringUp = false;
@@ -331,7 +337,7 @@ final class BotTaskHandler extends TaskHandler {
         _logActivity('Simulated utterance ($millis ms)');
         final clip = AudioClip(
             pcm: Int16List(millis * AudioWireFormat.sampleRate ~/ 1000));
-        unawaited(_session?.handleUtterance(clip));
+        unawaited(_handleIncomingClip(clip));
       case ClearTranscriptUiCommand():
         _logActivity('Transcript cleared');
         unawaited(_session?.clearTranscript());
@@ -347,6 +353,12 @@ final class BotTaskHandler extends TaskHandler {
       case RetryBrainUiCommand():
         _logActivity('Retrying brain warm-up');
         unawaited(_session?.start());
+      case SetVoiceEnrollUiCommand(:final enabled):
+        _voiceEnrollActive = enabled;
+        if (!enabled) _lastEnrollTranscript = '';
+        _logActivity('Voice enroll ${enabled ? 'on' : 'off'}');
+      case SaveVoiceEnrollUiCommand(:final overlayJson):
+        unawaited(_saveVoiceEnroll(overlayJson));
     }
     _pushSnapshot(force: true);
   }
@@ -361,14 +373,14 @@ final class BotTaskHandler extends TaskHandler {
   void _onAudioFrame(AudioChunkMessage message) {
     final now = DateTime.now();
     _markInbound(now);
-    // Half-duplex: drop bot-mic frames while we are talking so the model
-    // does not hear its own TTS (the two-phone AEC masks this; ESP32 will not).
-    if (_speaker?.speaking == true) return;
     final started = message.isUtteranceStart || !_receivingUtterance;
-    if (started) {
+    if (started && !_voiceEnrollActive) {
       _utteranceFirstArrival = now;
       Log.i(_tag, 'utterance started (seq ${message.sequence})');
       _session?.noteIncomingAudio();
+    } else if (started) {
+      _utteranceFirstArrival = now;
+      Log.i(_tag, 'enroll utterance started (seq ${message.sequence})');
     }
     _utteranceLastArrival = now;
     _reassembler.add(message);
@@ -418,11 +430,60 @@ final class BotTaskHandler extends TaskHandler {
         'utterance: ${result.framesReceived} rx / ${result.framesLost} lost, crc ${result.checksumHex}');
 
     if (result.pcm.isNotEmpty) {
-      unawaited(_session?.handleUtterance(AudioClip(pcm: result.pcm)));
-    } else {
+      unawaited(_handleIncomingClip(AudioClip(pcm: result.pcm)));
+    } else if (!_voiceEnrollActive) {
       _session?.cancelListening();
+    } else {
+      _recordEnrollTranscript('');
     }
     _pushSnapshot();
+  }
+
+  Future<void> _handleIncomingClip(AudioClip clip) async {
+    if (_voiceEnrollActive) {
+      await _transcribeEnroll(clip);
+      return;
+    }
+    await _session?.handleUtterance(clip);
+  }
+
+  Future<void> _transcribeEnroll(AudioClip clip) async {
+    String heard = '';
+    try {
+      heard = (await _hybrid?.transcribeOnly(clip))?.trim() ?? '';
+    } catch (e) {
+      Log.w(_tag, 'enroll transcribe failed: $e');
+    }
+    _recordEnrollTranscript(heard);
+  }
+
+  void _recordEnrollTranscript(String heard) {
+    _lastEnrollTranscript = heard;
+    _enrollSeq++;
+    if (heard.isEmpty) {
+      _logActivity('Enroll: (no transcript)');
+    } else {
+      _logActivity('Enroll: $heard');
+    }
+    _pushSnapshot(force: true);
+  }
+
+  Future<void> _saveVoiceEnroll(String overlayJson) async {
+    final overlay = FastIntentOverlay.decode(overlayJson);
+    if (overlay == null) {
+      Log.w(_tag, 'saveVoiceEnroll: overlay JSON rejected');
+      _voiceEnrollActive = false;
+      _pushSnapshot(force: true);
+      return;
+    }
+    final store = _fastIntentStore;
+    if (store != null) {
+      await store.save(overlay);
+    }
+    _hybrid?.overlay = overlay;
+    _voiceEnrollActive = false;
+    _logActivity('Voice enroll saved');
+    _pushSnapshot(force: true);
   }
 
   // --- telemetry ---
@@ -463,95 +524,32 @@ final class BotTaskHandler extends TaskHandler {
     if (session.state != _lastExpressedBrainState) {
       _lastExpressedBrainState = session.state;
       _expressBrainState(session.state, hadError: session.lastError != null);
+      _scheduleExpressionDecay(session.state);
     }
-    _pushCaption(session);
-    _pushSpeech(session);
     _updateNotification();
     _pushSnapshot();
   }
 
-  void _pushSpeech(BrainSession session) {
-    final speaker = _speaker;
-    if (speaker == null) return;
-    final prev = _lastSpeakerBrainState;
-    if (session.state == BrainSessionState.thinking &&
-        prev != BrainSessionState.thinking &&
-        prev != BrainSessionState.responding) {
-      unawaited(speaker.beginTurn());
-    }
-    if (session.state == BrainSessionState.responding &&
-        session.responseText.isNotEmpty) {
-      unawaited(speaker.update(session.responseText, isFinal: false));
-    }
-    if (prev == BrainSessionState.responding &&
-        session.state == BrainSessionState.ready &&
-        session.lastResponseText.isNotEmpty) {
-      unawaited(speaker.update(session.lastResponseText, isFinal: true));
-    }
-    _lastSpeakerBrainState = session.state;
-  }
-
-  void _onBotSpeaking(bool speaking) {
-    if (speaking) {
-      _reassembler.reset();
-      _receivingUtterance = false;
-      _utteranceIdle?.cancel();
-      _session?.cancelListening();
-    }
-    _pushSnapshot();
-  }
-
-  /// M3 stand-in for TTS: stream the reply as a caption the simulator can
-  /// show. Frame header + command + flags are 6 bytes; ATT write is MTU-3.
-  void _pushCaption(BrainSession session) {
-    if (session.state == BrainSessionState.responding &&
-        session.responseText.isNotEmpty) {
-      _sendCaption(session.responseText, isFinal: false);
-    }
-    if (_lastCaptionBrainState == BrainSessionState.responding &&
-        session.state == BrainSessionState.ready &&
-        session.lastResponseText.isNotEmpty) {
-      _pendingCaption?.cancel();
-      _pendingCaption = null;
-      _sendCaption(session.lastResponseText, isFinal: true, force: true);
-    }
-    _lastCaptionBrainState = session.state;
-  }
-
-  void _sendCaption(String text, {required bool isFinal, bool force = false}) {
-    if (!isFinal && !force) {
-      final now = DateTime.now();
-      final elapsed = now.difference(_lastCaptionAt);
-      if (elapsed < _minCaptionGap) {
-        _pendingCaption ??= Timer(_minCaptionGap - elapsed, () {
-          _pendingCaption = null;
-          final session = _session;
-          if (session != null &&
-              session.state == BrainSessionState.responding &&
-              session.responseText.isNotEmpty) {
-            _sendCaption(session.responseText, isFinal: false, force: true);
-          }
-        });
-        return;
-      }
-    }
-    _pendingCaption?.cancel();
-    _pendingCaption = null;
-    _lastCaptionAt = DateTime.now();
-
+  /// Sends timer countdown (or clear) to the bot OLED via [ShowTextCommand].
+  void _sendOledTimerText(String text) {
     final link = _link;
-    if (link == null || link.state != BotLinkState.ready) return;
-    // header(4) + cmd(1) + flags(1) + ATT(3) → remaining bytes for UTF-8.
+    if (link == null || link.state != BotLinkState.ready) {
+      Log.w(_tag, 'timer OLED skipped (link ${link?.state.name ?? 'null'}): '
+          '${text.isEmpty ? 'clear' : text}');
+      return;
+    }
     final maxUtf8 = (link.mtu - 9).clamp(16, 500);
     final utf8Text = _utf8Truncated(text, maxUtf8);
+    Log.i(_tag, 'timer OLED -> ${text.isEmpty ? '(clear)' : text}');
     _sendControl(
       ShowTextCommand(
         sequence: _controlSeq.next(),
         utf8Text: utf8Text,
-        isFinal: isFinal,
+        isFinal: text.isEmpty,
       ),
-      isFinal ? 'caption' : 'caption…',
-      quiet: !isFinal,
+      text.isEmpty ? 'timer clear' : 'timer',
+      quiet: true,
+      reconnectOnWriteFailure: false,
     );
   }
 
@@ -568,18 +566,40 @@ final class BotTaskHandler extends TaskHandler {
     return Uint8List.fromList(bytes.sublist(0, end));
   }
 
-  /// Shows the brain's state on the bot's body. This is the M2 human bar:
-  /// with the UI dead, a spoken utterance still visibly moves the bot.
+  /// Shows warming / thinking on the bot's body via the expression catalog.
+  /// Ready and responding do not overwrite — model `express()` is the face.
   void _expressBrainState(BrainSessionState state, {required bool hadError}) {
+    final mood = systemMoodForBrainState(state);
+    if (mood != null) {
+      _body?.showMood(mood, labelPrefix: 'system', quiet: true);
+      return;
+    }
+    if (state == BrainSessionState.thinking) {
+      // Not a catalog mood (BotMood is the express() tool schema). Purple
+      // breathe is the reserved lifecycle signature the visor renders as
+      // its dedicated "thinking" animation.
+      _sendControl(
+          SetLedCommand(
+            sequence: _controlSeq.next(),
+            red: 160,
+            green: 0,
+            blue: 255,
+            pattern: LedPattern.breathe,
+          ),
+          'led thinking',
+          quiet: true);
+      return;
+    }
+    if (state == BrainSessionState.responding ||
+        state == BrainSessionState.ready) {
+      return;
+    }
     final led = switch (state) {
-      // Warming: breathing blue — reload/re-prefill in progress.
-      BrainSessionState.warming => (0, 60, 255, LedPattern.breathe),
-      BrainSessionState.thinking => (255, 180, 0, LedPattern.breathe),
-      BrainSessionState.responding => (0, 255, 80, LedPattern.solid),
-      BrainSessionState.ready => (0, 0, 0, LedPattern.off),
       BrainSessionState.cold =>
         hadError ? (255, 0, 0, LedPattern.blink) : (0, 0, 0, LedPattern.off),
+      _ => null,
     };
+    if (led == null) return;
     _sendControl(
         SetLedCommand(
           sequence: _controlSeq.next(),
@@ -590,12 +610,44 @@ final class BotTaskHandler extends TaskHandler {
         ),
         'led ${state.name}',
         quiet: true);
-    if (state == BrainSessionState.responding) {
+  }
+
+  /// Once the brain settles on ready, let the turn's expression linger for
+  /// [_expressionHold], then relax to neutral (LED off → resting face);
+  /// after [_dozeAfterIdle] more of silence, doze off to sleepy. Any state
+  /// change (new utterance, cue, warming) cancels the decay so a fresh
+  /// expression is never cut short.
+  void _scheduleExpressionDecay(BrainSessionState state) {
+    _expressionDecay?.cancel();
+    _expressionDecay = null;
+    if (state != BrainSessionState.ready) return;
+    _expressionDecay = Timer(_expressionHold, () {
+      if (_session?.state != BrainSessionState.ready) return;
       _sendControl(
-          PlaySoundCommand(sequence: _controlSeq.next(), sound: BotSound.chirp),
-          'chirp (response start)',
+          SetLedCommand(
+            sequence: _controlSeq.next(),
+            red: 0,
+            green: 0,
+            blue: 0,
+            pattern: LedPattern.off,
+          ),
+          'led idle',
           quiet: true);
-    }
+      _expressionDecay = Timer(_dozeAfterIdle, () {
+        if (_session?.state != BrainSessionState.ready) return;
+        // Raw LED (no showMood): dozing off should not purr out loud.
+        _sendControl(
+            SetLedCommand(
+              sequence: _controlSeq.next(),
+              red: 0,
+              green: 60,
+              blue: 255,
+              pattern: LedPattern.breathe,
+            ),
+            'led doze',
+            quiet: true);
+      });
+    });
   }
 
   /// Tool calls from the brain, mapped onto BLE / timers / battery.
@@ -607,7 +659,24 @@ final class BotTaskHandler extends TaskHandler {
     }
     try {
       final invoked = await body.invoke(name, args);
+      if (invoked.cancelledId != null) {
+        _dartTimers.remove(invoked.cancelledId)?.cancel();
+        if (invoked.armed == null) {
+          _logActivity(
+              'Timer cancelled: ${invoked.result['label'] ?? invoked.cancelledId}');
+        }
+        _syncTimerCaptionTicker();
+      }
       if (invoked.armed != null) _armTimer(invoked.armed!);
+      if (invoked.paused != null) {
+        _dartTimers.remove(invoked.paused!.id)?.cancel();
+        _logActivity('Timer paused: ${invoked.paused!.label}');
+        _syncTimerCaptionTicker();
+      }
+      if (invoked.resumed != null) {
+        _armTimer(invoked.resumed!);
+        _logActivity('Timer resumed: ${invoked.resumed!.label}');
+      }
       return invoked.result;
     } catch (e, stack) {
       Log.e(_tag, 'tool $name failed', e, stack);
@@ -619,14 +688,19 @@ final class BotTaskHandler extends TaskHandler {
     final store = _timerStore;
     if (store == null) return;
     for (final timer in store.pending) {
+      if (timer.isPaused) continue;
       _armTimer(timer);
     }
     if (store.pending.isNotEmpty) {
       Log.i(_tag, 'restored ${store.pending.length} timer(s)');
     }
+    _syncTimerCaptionTicker();
   }
 
   void _armTimer(PendingTimer timer) {
+    for (final id in _dartTimers.keys.toList()) {
+      if (id != timer.id) _dartTimers.remove(id)?.cancel();
+    }
     _dartTimers[timer.id]?.cancel();
     final delay = timer.remainingAt(DateTime.now());
     if (delay == Duration.zero) {
@@ -634,6 +708,9 @@ final class BotTaskHandler extends TaskHandler {
       return;
     }
     _dartTimers[timer.id] = Timer(delay, () => unawaited(_fireTimer(timer)));
+    Log.i(_tag, 'timer ${timer.id} armed ${timer.totalSeconds}s, '
+        'fires in ${delay.inSeconds}s');
+    _syncTimerCaptionTicker();
   }
 
   Future<void> _fireTimer(PendingTimer timer) async {
@@ -641,10 +718,52 @@ final class BotTaskHandler extends TaskHandler {
     await _timerStore?.remove(timer.id);
     _logActivity('Timer fired: ${timer.label}');
     Log.i(_tag, 'timer ${timer.id} fired (${timer.label})');
+    _syncTimerCaptionTicker();
     await _session?.handleCue(
       "A timer just finished: '${timer.label}'. "
-      'Tell the human in one short spoken sentence. Call a tool if it fits.',
+      'Call express(alarm). Do not speak.',
     );
+  }
+
+  /// Starts, refreshes, or stops the 1 Hz countdown on the bot OLED.
+  /// Paused-only remaining stays on the face but does not tick.
+  void _syncTimerCaptionTicker() {
+    final store = _timerStore;
+    if (store == null || store.pending.isEmpty) {
+      _stopTimerCaptionTicker();
+      return;
+    }
+    _pushTimerCaption();
+    final anyRunning = store.pending.any((t) => !t.isPaused);
+    if (!anyRunning) {
+      _timerCaptionTicker?.cancel();
+      _timerCaptionTicker = null;
+      return;
+    }
+    _timerCaptionTicker ??= Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _pushTimerCaption(),
+    );
+  }
+
+  void _stopTimerCaptionTicker() {
+    _timerCaptionTicker?.cancel();
+    _timerCaptionTicker = null;
+    _sendOledTimerText('');
+  }
+
+  void _pushTimerCaption() {
+    final store = _timerStore;
+    if (store == null || store.pending.isEmpty) {
+      _stopTimerCaptionTicker();
+      return;
+    }
+    final shown = timerForDisplay(store.pending, DateTime.now());
+    if (shown == null) {
+      _stopTimerCaptionTicker();
+      return;
+    }
+    _sendOledTimerText(formatTimerCountdown(shown, DateTime.now()));
   }
 
   static const Duration _batteryWait = Duration(seconds: 2);
@@ -704,6 +823,9 @@ final class BotTaskHandler extends TaskHandler {
       final session = _session;
       if (session == null) return;
       _expressBrainState(session.state, hadError: session.lastError != null);
+      // On ready the call above leaves the alert LED as-is; restart the
+      // decay so the alert face still relaxes back to neutral.
+      _scheduleExpressionDecay(session.state);
     });
   }
 
@@ -724,6 +846,10 @@ final class BotTaskHandler extends TaskHandler {
       if (session != null) {
         _expressBrainState(session.state,
             hadError: session.lastError != null);
+      }
+      // Timer ticks may have been skipped while the link was down.
+      if (_timerStore?.pending.isNotEmpty ?? false) {
+        _pushTimerCaption();
       }
     } else {
       _notifyLinkReady = false;
@@ -775,13 +901,15 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   void _sendControl(ControlMessage message, String label,
-      {bool quiet = false}) {
+      {bool quiet = false, bool reconnectOnWriteFailure = true}) {
     final link = _link;
     if (link == null || link.state != BotLinkState.ready) {
       if (!quiet) _logActivity('$label skipped: not connected');
       return;
     }
-    unawaited(link.sendControl(message).then((_) {
+    unawaited(link
+        .sendControl(message, reconnectOnWriteFailure: reconnectOnWriteFailure)
+        .then((_) {
       if (!quiet) _logActivity(label);
     }).catchError((Object e) {
       _logActivity('$label FAILED: $e');
@@ -858,7 +986,7 @@ final class BotTaskHandler extends TaskHandler {
       brainKind: _gemma?.kind ?? 'FakeBrain',
       downloadPercent: _gemma?.downloadPercent,
       downloadRemainingSec: _gemma?.downloadRemainingSec,
-      lastLatency: _gemma?.lastLatency,
+      lastLatency: _hybrid?.lastLatency ?? _gemma?.lastLatency,
       replayedEntries: session?.replayedEntries ?? 0,
       droppedUtterances: session?.droppedUtterances ?? 0,
       responseText: session?.responseText ?? '',
@@ -875,6 +1003,10 @@ final class BotTaskHandler extends TaskHandler {
           ? transcript.sublist(transcript.length - 50)
           : transcript,
       activity: List.of(_activity),
+      voiceEnrollActive: _voiceEnrollActive,
+      lastEnrollTranscript: _lastEnrollTranscript,
+      enrollSeq: _enrollSeq,
+      voiceEnrollHasOverlay: _fastIntentStore?.hasOverlay ?? false,
     );
     FlutterForegroundTask.sendDataToMain(snapshot.toMap());
   }

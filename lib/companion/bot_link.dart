@@ -194,8 +194,9 @@ bool shouldAdoptScanningState(BotLinkState state) {
 
 /// A queued control write, completed when the peripheral acks it.
 final class _ControlWrite {
-  _ControlWrite(this.frame);
+  _ControlWrite(this.frame, {this.reconnectOnWriteFailure = true});
   final Uint8List frame;
+  final bool reconnectOnWriteFailure;
   final Completer<void> completer = Completer<void>();
 }
 
@@ -786,11 +787,21 @@ final class BotLink extends ChangeNotifier {
 
   /// Queues a control command ahead of any audio. Completes when the bot
   /// acks the write (control uses write-with-response).
-  Future<void> sendControl(ControlMessage message) {
+  ///
+  /// Optional commands ([ShowTextCommand] when firmware has no display) must
+  /// pass [reconnectOnWriteFailure] false — an ATT error must not tear
+  /// the link the way a dead GATT client does.
+  Future<void> sendControl(
+    ControlMessage message, {
+    bool reconnectOnWriteFailure = true,
+  }) {
     if (state != BotLinkState.ready) {
       return Future.error(StateError('not connected'));
     }
-    final write = _ControlWrite(message.encode());
+    final write = _ControlWrite(
+      message.encode(),
+      reconnectOnWriteFailure: reconnectOnWriteFailure,
+    );
     _controlQueue.add(write);
     _pump();
     return write.completer.future;
@@ -833,8 +844,9 @@ final class BotLink extends ChangeNotifier {
             Log.e(_tag, 'control write failed (${bleLogDetail(e)})');
             write.completer.completeError(e);
             // Native GATT client gone (binder died) or the handle is a
-            // ghost: Dart still says ready. Drop and rescan.
-            if (state == BotLinkState.ready) {
+            // ghost: Dart still says ready. Drop and rescan. Optional
+            // commands (show_text on firmware without a display) must not do this.
+            if (write.reconnectOnWriteFailure && state == BotLinkState.ready) {
               unawaited(forceReconnect(reason: 'control write failed'));
             }
             break;

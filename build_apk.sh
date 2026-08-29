@@ -23,6 +23,16 @@ else
   flutter=(flutter)
 fi
 
-"${flutter[@]}" build apk --release --dart-define-from-file=config.json "$@"
+# arm64 only (LiteRT FFI is arm64-v8a). Obfuscate + split-debug-info
+# shrinks libapp.so; symbols land next to the APK for crash decoding.
+# Native ML (.so) still dominates size — do not strip LiteRT / onnxruntime.
+"${flutter[@]}" build apk --release \
+  --target-platform android-arm64 \
+  --obfuscate \
+  --split-debug-info="$root/build/app/outputs/symbols" \
+  --tree-shake-icons \
+  --dart-define-from-file=config.json \
+  "$@"
 
-echo "Built $root/build/app/outputs/flutter-apk/app-release.apk"
+apk="$root/build/app/outputs/flutter-apk/app-release.apk"
+echo "Built $apk ($(du -h "$apk" | awk '{print $1}'))"

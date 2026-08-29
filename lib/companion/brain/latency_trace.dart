@@ -1,10 +1,9 @@
 /// Per-turn latency breakdown (M3).
 ///
-/// The product budget is end-of-speech → first audio out of the bot speaker
-/// ≤ 2 s warm on E2B (3.5 s ceiling). The clip-based `respond(AudioClip)`
-/// path is fully sequential, so worst-case latency is the *sum* of stages.
-/// TTS + BLE transmit are logged by ReplySpeaker (`first audio Xms`).
-/// [firstTokenMs] remains end-of-speech → first token.
+/// The product budget is end-of-speech → first expression on the body.
+/// The clip-based `respond(AudioClip)` path is fully sequential, so
+/// worst-case latency is the *sum* of stages. [firstTokenMs] is
+/// end-of-speech → first tool call (`express(...)`).
 library;
 
 /// One inference turn, split into the stages we can actually measure.
@@ -33,8 +32,7 @@ final class LatencyTrace {
   /// `addQueryChunk` of the audio clip — encoder + staging.
   final int submitMs;
 
-  /// End of `respond()` start → first [TextDelta]. Includes submit + prefill.
-  /// This is the M3 stand-in for "first audio out" until TTS lands.
+  /// End of `respond()` start → first tool call. Includes submit + prefill.
   final int firstTokenMs;
 
   /// First token → [Done].
@@ -46,7 +44,7 @@ final class LatencyTrace {
   /// `gpu` or `cpu`, whichever load succeeded.
   final String? backend;
 
-  /// First token, for the debug panel (proves streaming, not a stall).
+  /// First tool-call line (`express(happy)`), for the debug panel.
   final String? firstTokenText;
 
   /// One-line logcat summary.

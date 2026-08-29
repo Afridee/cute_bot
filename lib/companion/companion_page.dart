@@ -573,10 +573,10 @@ class _BrainGroup extends StatelessWidget {
           const SizedBox(height: CuteBotSpace.sm),
           NdStatusText.error(s.brainError!),
         ],
-        if (s.responseText.isNotEmpty) ...[
+        if (s.responseText.isNotEmpty || s.lastResponseText.isNotEmpty) ...[
           const SizedBox(height: CuteBotSpace.md),
           Text(
-            s.responseText,
+            s.responseText.isNotEmpty ? s.responseText : s.lastResponseText,
             style: nd.typography.body,
           ),
         ],
@@ -592,6 +592,10 @@ class _BrainGroup extends StatelessWidget {
               onPressed: s.brainState == BrainSessionState.ready
                   ? controller.simulateUtterance
                   : null,
+            ),
+            NdButton.secondary(
+              label: 'Teach how you sound',
+              onPressed: controller.beginVoiceReenroll,
             ),
           ],
         ),
@@ -627,7 +631,7 @@ class _AudioGroup extends StatelessWidget {
           const NdStatusText('[RECEIVING]')
         else if (stats == null)
           Text(
-            'No utterance received yet. Hold-to-talk on the simulator phone.',
+            'No utterance received yet. Talk to the bot.',
             style: nd.typography.body.copyWith(color: nd.colors.textSecondary),
           )
         else ...[

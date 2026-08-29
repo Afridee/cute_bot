@@ -31,10 +31,6 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
-
   # BLE: one package for both roles - peripheral (bot simulator, M0) and
   # central (companion, M1). flutter_blue_plus is central-only, which is
   # why it is not used here.
@@ -67,6 +63,10 @@ dependencies:
   # M5: TTS to a WAV file (not the phone speaker), then we resample/ADPCM
   # and ship PCM over BLE. Named in the brief.
   flutter_tts: 4.2.5
+
+  # Offline ASR sidecar for the NLP fast path. CPU Whisper base.en, ~161 MB.
+  # Must not share a GPU with LiteRT.
+  sherpa_onnx: 1.13.6
 
 dev_dependencies:
   flutter_test:

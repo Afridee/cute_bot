@@ -155,11 +155,13 @@ void main() {
       // No command id.
       expect(() => BotMessage.decode(Uint8List.fromList([MessageType.control, 0, 0, 0])),
           throwsA(isA<ProtocolException>()));
-      // Unknown command id.
-      expect(
-          () => BotMessage.decode(
-              Uint8List.fromList([MessageType.control, 0, 0, 0, 0x7F])),
-          throwsA(isA<ProtocolException>()));
+      // Unknown command id: ACK-and-ignore, never an ATT error.
+      final ignored = BotMessage.decode(
+              Uint8List.fromList([MessageType.control, 0, 0, 0, 0x7F, 0x01]))
+          as IgnoredControlCommand;
+      expect(ignored.rawCommandId, 0x7F);
+      expect(ignored.rawArgs, [0x01]);
+      expect(BotMessage.decode(ignored.encode()), isA<IgnoredControlCommand>());
       // set_led with missing args.
       expect(
           () => BotMessage.decode(Uint8List.fromList(

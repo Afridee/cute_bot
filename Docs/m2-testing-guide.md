@@ -1,9 +1,10 @@
 # M2 human-bar testing guide — the service must not die (and when it does, it must come back)
 
-> **Status:** M2 agent bar is complete. M2.5 added CDM, a notification
-> listener, a keep-alive alarm, and a watchdog for kills this guide treats
-> as out of scope (`force-stop`, vivo Recents). Use
-> `Docs/m2.5-testing-guide.md` for those. Current product status: `README.md`.
+> **Status:** M2 agent bar is complete. M2.5 human bar **passed** — CDM,
+> a notification listener, a keep-alive alarm, and a watchdog for kills
+> this guide treats as out of scope (`force-stop`, vivo Recents).
+> Procedure: `Docs/m2.5-testing-guide.md`. Current product status:
+> `README.md`.
 
 M2's claim: the bot lives in a foreground service, not in the app UI. The
 human bar from the brief:

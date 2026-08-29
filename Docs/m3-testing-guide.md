@@ -101,9 +101,9 @@ real spoken clip — silence is a hostile input for a native-audio model.
 - `ttf` is logged every turn. Write the number down; it is the M3
   budget check.
 - A tool call (`set_led` / `wiggle` / `play_sound`) visibly moves the
-  simulator. `get_battery` should come back as a real percent in the
-  spoken follow-up; `set_timer` should arm a phone-side timer.
-  TTS / timer kill-survival: `Docs/m4-testing-guide.md`.
+  simulator. `get_battery` in the spoken follow-up, `set_timer`
+  kill-survival, and TTS out of the bot speaker are the M4/M5 human
+  bar — **passed**; procedure: `Docs/m4-testing-guide.md`.
 
 ## Kill / recovery (still M2's contract, now with a real model)
 

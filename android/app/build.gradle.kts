@@ -30,9 +30,42 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         // .litertlm FFI is arm64-v8a only. Restrict so Play doesn't offer
-        // a broken APK to 32-bit / x86 devices.
+        // a broken APK to 32-bit / x86 devices. Replace (don't +=) so
+        // plugin jni from sherpa-onnx x86/armeabi never merge in.
         ndk {
-            abiFilters += "arm64-v8a"
+            abiFilters.clear()
+            abiFilters.add("arm64-v8a")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // sherpa-onnx ships onnxruntime; keep a single copy if another
+            // plugin also unpacks it.
+            pickFirsts += "**/libonnxruntime.so"
+            pickFirsts += "**/libc++_shared.so"
+            // Keep native libs compressed in the APK. AGP's default
+            // (uncompressed, page-aligned) would nearly triple sideload
+            // size — LiteRT + onnxruntime dominate the package.
+            useLegacyPackaging = true
+            excludes += "lib/armeabi-v7a/**"
+            excludes += "lib/x86/**"
+            excludes += "lib/x86_64/**"
+            // LiteRT-LM's hook also ships Qualcomm Hexagon NPU (QNN) and
+            // WebGPU companions. Companion inference is OpenCL GPU (see
+            // AndroidManifest libvndksupport / libOpenCL). NPU is unused
+            // and the skel/stub set is tens of MB.
+            excludes += "**/libQnn*.so"
+            excludes += "**/libLiteRtDispatch_Qualcomm.so"
+            excludes += "**/libLiteRtWebGpuAccelerator.so"
+            excludes += "**/libLiteRtTopKWebGpuSampler.so"
+        }
+        dex {
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += "META-INF/androidx/**"
+            excludes += "META-INF/*.version"
         }
     }
 
@@ -41,6 +74,12 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }

@@ -4,13 +4,11 @@ Flutter companion app for a small desk robot (mic + speaker + BLE; ESP32 later).
 All intelligence runs on the phone, fully offline. The bot is ears, a mouth,
 and a face.
 
-**Milestone status: M4 (timers / battery-into-the-brain) and M5
-(TTS over BLE + persona) complete (agent bar). Human-bar: a spoken
-reply must come out of the simulator speaker, `set_timer` must
-survive a service kill, and `get_battery` must come back as a real
-percent. See `Docs/m4-testing-guide.md`. M3 native-audio checks remain
-in `Docs/m3-testing-guide.md`; M2.5 keep-alive in
-`Docs/m2.5-testing-guide.md`.**
+**Milestone status: M0–M5 complete, including two-phone human bars.**
+M2.5 keep-alive (CDM, resurrection, phone alerts, OEM Recents):
+`Docs/m2.5-testing-guide.md`. M3 native audio:
+`Docs/m3-testing-guide.md`. M4/M5 TTS / timer / battery:
+`Docs/m4-testing-guide.md`.
 
 Milestone numbering follows `cursor-prompt-bot-companion.md` for M0–M2 and
 M3+. **M2.5** is background survivability. **M3** is the LLM layer.
@@ -27,14 +25,15 @@ Gemma). **M5** is TTS to the bot speaker plus `persona.dart`.
 | `lib/shared/log.dart` | Single logging channel with levels. `adb logcat | grep CuteBot`. |
 | `lib/bot_simulator/` | Peripheral (GATT server) mode: a second Android phone standing in for the ESP32. |
 | `lib/companion/` | Central mode — the actual app. `bot_link.dart` (scan / auto-connect / MTU 517 / reconnect backoff / prioritized writes); since M2 the UI is a thin client over the foreground service. |
-| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the `BotBrain` interface, including `respondToCue` for timer fires), `fake_brain.dart`, `gemma_brain.dart`, `brain_session.dart` (serialized conversation queue), `transcript.dart`, `pcm16.dart` / `latency_trace.dart` / `bot_tools.dart`. |
+| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the `BotBrain` interface, including `respondToCue` for timer fires), `fake_brain.dart`, `gemma_brain.dart`, `hybrid_brain.dart` + `fast_intent.dart` (NLP fast path) + `fast_intent_overlay.dart` / `fast_intent_enroll.dart` (per-user ASR aliases, no Gemma), `sherpa_clip_asr.dart` (on-device ASR so spoken commands can hit that path), `brain_session.dart` (serialized conversation queue), `transcript.dart`, `pcm16.dart` / `latency_trace.dart` / `bot_tools.dart`. |
 | `lib/companion/persona.dart` | M5: system prompt + few-shots. The only place personality lives. |
 | `lib/companion/voice/` | M5: `Voice` interface, `FlutterTtsVoice` (`synthesizeToFile` → WAV → 16 kHz PCM), `FakeVoice`, sentence splitter, `ReplySpeaker` (sentence-by-sentence ADPCM over BLE). |
-| `lib/companion/service/` | Foreground service plus `bot_body.dart` (tool dispatch), `timer_store.dart` (pending timers on the same KV store as the transcript), `service_ipc.dart`, `task_storage.dart`, `notification_text.dart`. |
+| `lib/companion/service/` | Foreground service plus `bot_body.dart` (tool dispatch), `timer_store.dart` (pending timers on the same KV store as the transcript), `fast_intent_store.dart` (per-user ASR overlay), `service_ipc.dart`, `task_storage.dart`, `notification_text.dart`. |
 | `lib/companion/companion_device_link.dart` | M2.5: Dart wrapper over the CDM MethodChannel — associate / disassociate / state for the "Android link" card. |
 | `lib/companion/oem_care.dart` | M2.5: Dart face of OEM diagnostics — manufacturer/brand, sticky "service died behind our back" marker, Notification-access grant. |
 | `lib/companion/oem_guidance_page.dart` | M2.5: one-shot "Keep the bot alive" page for vivo/iQOO (Notification access first, then Recents lock / autostart / background power). Auto-shown after an unexpected death; always reachable via **Keep-alive tips**. |
 | `lib/companion/setup/` | First-run Companion setup in front of the debug panel. Order, copy, and block/skip rules: `Docs/companion-setup.md`. |
+| `Docs/hardware-guide.md` | Desk-bot BOM, VAD, and firmware parity with the companion (same BLE contract as the simulator). |
 | `android/app/src/main/kotlin/com/cutebot/cute_bot/` | M2.5 native layer. Restart funnel: `BotServiceStarter` (the one shared restart path). Wake sources: `BotPresenceService` (CDM, API 31+), `CuteBotNotificationListenerService` (isolated `:listener` process), `KeepAliveReceiver` (~60 s AlarmManager), `ServiceWatchdog` (15-min WorkManager). Cross-process: `CuteBotProcesses`, `DefaultProcessRelay`. Bind heal: `ListenerBindPoke`. OEM: `OemCareHandler`, `CuteBotApplication`. CDM chooser: `CompanionLinkHandler`. |
 
 ## Toolchain
@@ -74,6 +73,9 @@ Gemma). **M5** is TTS to the bot speaker plus `persona.dart`.
 - `flutter_tts` 4.2.5 — M5. Named in the brief. `synthesizeToFile` (not
   `speak`) so PCM can be resampled to 16 kHz, ADPCM-encoded, and written
   to the bot speaker. The phone speaker stays silent.
+- `sherpa_onnx` 1.13.6 — on-device ASR (Whisper base.en, CPU, ~161 MB)
+  so spoken clips become text for the NLP fast path. Gemma still takes
+  native audio when the matcher misses.
 
 ## Protocol summary (v1)
 
@@ -113,7 +115,7 @@ arriving off the radio flow straight into a strictly serialized conversation
 queue (the LiteRT-LM one-conversation rule, enforced from day one); every
 transcript line persists on append via flutter_foreground_task's store, and
 on restart the session reloads the transcript, re-warms, and shows warming
-state on the bot's LEDs (breathing blue) while it does. Kill → restart →
+state on the bot's OLED face (breathing blue) while it does. Kill → restart →
 re-warm is handled as a normal lifecycle: START_STICKY + `allowAutoRestart`
 cover system kills, `autoRunOnBoot` covers reboot, and the UI — now a thin
 client — just renders `ServiceSnapshot`s pushed over the task channel and
@@ -185,10 +187,13 @@ Tool dispatch lives in `BotBody`. `set_led` / `wiggle` / `play_sound`
 are BLE control writes (the simulator already shows them). `get_battery`
 writes the command, waits up to 2 s for telemetry, and returns
 percent / mV to the model. `set_timer` persists on the same KV store as
-the transcript (survives kill → restart) and arms a Dart timer; when it
-fires, the announcement enters `BrainSession.handleCue` on the **same**
-serialized conversation queue as spoken turns — never a second LiteRT
-session. Due timers restore after brain warm-up.
+the transcript (survives kill → restart) and arms a Dart timer; a second
+`set_timer` replaces the current clock. When it fires, the announcement
+enters `BrainSession.handleCue` on the **same** serialized conversation
+queue as spoken turns — never a second LiteRT session. Due timers restore
+after brain warm-up. `cancel_timer`, `pause_timer`, and `resume_timer`
+drop, freeze, or continue the pending countdown (the OLED stays on the
+last `HH:MM:SS` while paused).
 
 ## M5 in one paragraph
 
@@ -199,8 +204,8 @@ and ships one BLE utterance (start → frames → end) on audio-to-bot.
 The simulator already sets `BotState.speaking` on that start flag and
 mutes by not capturing; the companion also drops inbound mic frames
 while TTS is in flight (half-duplex). Captions still go to the
-simulator screen as a subtitle. `Docs/m4-testing-guide.md` walks the
-two-phone TTS / timer / battery test.
+simulator screen as a subtitle. `Docs/m4-testing-guide.md` is the
+two-phone TTS / timer / battery human bar (passed).
 
 ## Running the M0 human-bar test
 
@@ -230,10 +235,18 @@ two-phone TTS / timer / battery test.
   negotiated MTU. Fine for the companion (it negotiates 517); nRF Connect
   users must request a bigger MTU manually.
 - Echo: the two-phone simulator has hardware AEC, the real bot will not.
-  v1 half-duplex: companion drops inbound mic while `ReplySpeaker` is
-  sending, and the simulator sets `BotState.speaking` on audio-to-bot
-  start (so firmware can mute the mic the same way).
+  v1 half-duplex is confirmed on the simulator: companion drops inbound
+  mic while `ReplySpeaker` is sending, and the simulator sets
+  `BotState.speaking` on audio-to-bot start (so firmware can mute the
+  mic the same way). Hold-to-talk during playback does not start a
+  new companion turn.
 - Simulator battery telemetry is faked (87%, 3970 mV).
+- `show_text` carries UTF-8 captions for the simulator screen and the desk
+  bot's OLED (e.g. `thinking…`, tool lines). The companion still sends a
+  **final** caption (and streams only if TTS failed) with
+  `reconnectOnWriteFailure: false`. Firmware must ACK unknown / optional
+  control ids — an ATT error reconnects the phone. See the firmware table
+  in `Docs/hardware-guide.md`.
 - **Boot restart (M2):** `autoRunOnBoot` uses a BOOT_COMPLETED receiver.
   `connectedDevice` services are allowed to start from BOOT_COMPLETED on
   Android 15+, but Android 12+ background-start restrictions and OEM battery
@@ -243,20 +256,20 @@ two-phone TTS / timer / battery test.
   notification instead of failing silently. The keep-alive alarm does not
   survive reboot; `CuteBotApplication` re-arms it the next time any of our
   processes starts.
-- **CDM presence end-to-end (M2.5):** unverifiable without two phones — the
-  association chooser, the bonding handshake against the
-  `bluetooth_low_energy` simulator peripheral, and the appeared→resurrect
-  path are all human-bar. Plumbing is in and SDK-gated; see
-  `Docs/m2.5-testing-guide.md`.
-- **vivo Recents swipe vs Settings Force stop (M2.5):** a Recents swipe on
-  vivo can SIGKILL the default process while leaving `:listener` (and a
-  pre-armed keep-alive alarm) able to restart the FGS. A package
-  FORCE_STOP (Settings → Force stop, and sometimes vivo's single-cleaner)
-  kills every process and cancels alarms; self-recovery then depends on
-  `system_server` rebinding the enabled notification listener. If the OEM
-  never rebinds, only opening the app recovers — that is Android, not a
-  missed restart path. The guidance page tells vivo users to leave with
-  Home, lock the Recents card, and grant Notification access.
+- **CDM presence end-to-end (M2.5):** confirmed on two phones (human bar
+  passed). Association chooser, bonding against the
+  `bluetooth_low_energy` simulator peripheral, and appeared→resurrect
+  without opening the app. Procedure: `Docs/m2.5-testing-guide.md`.
+- **vivo Recents swipe vs Settings Force stop (M2.5):** Recents recovery
+  passed on the human bar. A Recents swipe on vivo can SIGKILL the
+  default process while leaving `:listener` (and a pre-armed keep-alive
+  alarm) able to restart the FGS. A package FORCE_STOP (Settings → Force
+  stop, and sometimes vivo's single-cleaner) kills every process and
+  cancels alarms; self-recovery then depends on `system_server` rebinding
+  the enabled notification listener. If the OEM never rebinds, only
+  opening the app recovers — that is Android, not a missed restart path.
+  The guidance page tells vivo users to leave with Home, lock the Recents
+  card, and grant Notification access.
 - **Notification timeout (M2.5):** skipped. `flutter_foreground_task` doesn't
   expose `Notification.setTimeoutAfter`, and re-posting the service's own
   foreground notification from outside would race the plugin's updates. The
@@ -264,9 +277,10 @@ two-phone TTS / timer / battery test.
 - **BLE from the service isolate (M2):** verified by source inspection of
   `bluetooth_low_energy_android` 6.2.1 — scan/connect/notify are
   Context-only; only `authorize()`/`showAppSettings()` need an Activity, so
-  the UI grants permissions before the service starts. Needs on-device
-  confirmation in the M2 human bar.
-- The service's warming/thinking LED expressions assume the bot is connected;
+  the UI grants permissions before the service starts. Confirmed on
+  device: the bot replies with only the foreground service running
+  (M3 / M2.5).
+- The service's warming/thinking face expressions assume the bot is connected;
   a bot that reconnects mid-state gets a re-send, but a bot that was never
   connected during warm-up simply misses the show. Harmless, revisit with
   real hardware.
@@ -287,12 +301,13 @@ two-phone TTS / timer / battery test.
   → `createSession`. LiteRT-LM's `FfiInferenceModel.createChat` still
   forwards `tools` (the base `InferenceModel.createChat` in flutter_gemma
   1.6.3 does not). Flagged in `gemma_brain.dart`.
-- **Latency budget:** ttf (end of speech → first token) is still the
-  M3 number. M5 adds `ReplySpeaker: first audio Xms` (turn start →
-  first BLE audio frame). The product budget is end-of-speech → first
-  audio out of the bot speaker ≤ 2 s on E2B (3.5 s ceiling) — that is
-  ttf + TTS synth of the first sentence + first BLE write. Report both
-  numbers from the human bar.
+- **Latency budget:** the M4/M5 two-phone path is confirmed (first
+  audio out of the simulator speaker). ttf (end of speech → first
+  token) is still the M3 number; M5 adds `ReplySpeaker: first audio
+  Xms` (turn start → first BLE audio frame). The product budget is
+  end-of-speech → first audio out of the bot speaker ≤ 2 s on E2B
+  (3.5 s ceiling) — that is ttf + TTS synth of the first sentence +
+  first BLE write. Log both every turn.
 - **minSdk 30 / Flutter 3.44.9:** hard requirements of `libLiteRtLm` and
   `flutter_gemma` 1.0+. Android 10 phones and the old 3.41.7 pin cannot
   run M3.

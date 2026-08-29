@@ -27,6 +27,7 @@ import '../shared/adpcm.dart';
 import '../shared/audio_transport.dart';
 import '../shared/ble_protocol.dart';
 import '../shared/log.dart';
+import '../shared/timer_display.dart';
 import 'advertise_recovery.dart';
 
 const String _tag = 'Simulator';
@@ -92,6 +93,11 @@ final class SimulatorController extends ChangeNotifier {
   // Bumped on each wiggle command so the UI can animate.
   int wiggleCount = 0;
 
+  // Arrival order of the last LED / wiggle commands. The visor uses
+  // "wiggle after LED" to tell delighted apart from happy (same LED).
+  DateTime? lastLedAt;
+  DateTime? lastWiggleAt;
+
   bool talking = false;
   int micFramesSent = 0;
 
@@ -137,8 +143,11 @@ final class SimulatorController extends ChangeNotifier {
   final List<SimulatorChatLine> conversation = [];
   static const int _maxChatLines = 40;
 
+  /// Countdown on the face (`HH:MM:SS` from companion timer ticker only).
+  String timerDisplay = '';
+
   // Fake battery served until real hardware exists.
-  static const int _batteryPercent = 87;
+  static const int _batteryPercent = 15;
   static const bool _batteryCharging = false;
   static const int _batteryMillivolts = 3970;
 
@@ -751,9 +760,11 @@ final class SimulatorController extends ChangeNotifier {
         ledGreen = green;
         ledBlue = blue;
         ledPattern = pattern;
+        lastLedAt = DateTime.now();
         _logActivity('set_led rgb($red,$green,$blue) ${pattern.name}');
       case WiggleCommand():
         wiggleCount += 1;
+        lastWiggleAt = DateTime.now();
         _logActivity('wiggle');
       case PlaySoundCommand(:final sound):
         _logActivity('play_sound ${sound.name}');
@@ -768,23 +779,29 @@ final class SimulatorController extends ChangeNotifier {
         ));
       case ShowTextCommand(:final utf8Text, :final isFinal):
         _onShowText(utf8Text, isFinal: isFinal);
+      case IgnoredControlCommand(:final rawCommandId):
+        _logActivity(
+            'ignored control 0x${rawCommandId.toRadixString(16)}');
     }
   }
 
   void _onShowText(Uint8List utf8Text, {required bool isFinal}) {
     final text = utf8.decode(utf8Text, allowMalformed: true);
-    final last = conversation.isEmpty ? null : conversation.last;
-    if (last != null &&
-        last.role == SimulatorChatRole.bot &&
-        last.streaming) {
-      last.text = text.isEmpty ? last.text : text;
-      last.streaming = !isFinal;
-    } else if (text.isNotEmpty) {
-      _appendChat(SimulatorChatRole.bot, text, streaming: !isFinal);
+    if (text.isEmpty) {
+      if (timerDisplay.isNotEmpty) {
+        Log.i(_tag, 'timer OLED cleared');
+      }
+      timerDisplay = '';
+      notifyListeners();
+      return;
     }
-    if (isFinal && text.isNotEmpty) {
-      _logActivity('bot: $text');
+    if (!isTimerDisplayText(text)) {
+      Log.d(_tag, 'show_text ignored (not timer): $text');
+      return;
     }
+    Log.i(_tag, 'timer OLED display: $text');
+    timerDisplay = text;
+    notifyListeners();
   }
 
   /// Stand-in for the ESP32's canned sound set: a short synthesized tone

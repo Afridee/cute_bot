@@ -13,10 +13,21 @@
 ///
 /// ADDENDUM (M3 caption, additive): [ControlCommandId.showText] (0x05)
 /// carries a UTF-8 caption on the existing control characteristic. UUIDs,
-/// header, and existing command encodings are unchanged. Unknown-command
-/// receivers (old simulator / ESP32) still reject 0x05; rebuild both
-/// phones. This is the stand-in for M5 TTS — the simulator has a screen,
-/// the desk robot will not keep this as a product surface.
+/// header, and existing command encodings are unchanged. Used on the Bot
+/// Simulator screen and on the desk robot's **0.96″ 128×64 SSD1306** OLED
+/// (status line or subtitle under the visor; see `Docs/hardware-guide.md`).
+/// The mute bot has no TTS mouth — captions are visual, not spoken.
+///
+/// ADDENDUM (ESP32 parity): unknown control command ids MUST be accepted
+/// at the ATT layer and ignored ([IgnoredControlCommand]). Never return
+/// an ATT error for an unknown id — the companion treats a failed
+/// write-with-response as a dead link and reconnects. Same rule for
+/// optional actuators the firmware does not have: [ControlCommandId.wiggle]
+/// is a no-op with no servo; [ControlCommandId.showText] is a no-op only
+/// when firmware has no display. Known commands that the companion actually
+/// depends on (set_led, play_sound, get_battery, audio both ways) must work.
+/// On v1 hardware the OLED face is driven locally from [SetLedCommand]
+/// mood signatures — see `Docs/hardware-guide.md`.
 ///
 /// ## Roles
 ///
@@ -107,6 +118,11 @@ abstract final class BotUuids {
 /// Local name used in advertising. Keep short: name + 128-bit service UUID
 /// must fit the advertisement payload or Android fails with
 /// ADVERTISE_FAILED_DATA_TOO_LARGE.
+///
+/// Firmware: put both the complete local name and the 128-bit service UUID
+/// in the *primary* advertisement (not only the scan response). Companion
+/// scan and CDM association filter on [BotUuids.service]. Flags (3) +
+/// complete name (9) + 128-bit UUID list (18) = 30 bytes of a 31-byte ADV.
 const String kAdvertisedName = 'CuteBot';
 
 // ---------------------------------------------------------------------------
@@ -316,7 +332,8 @@ abstract final class ControlCommandId {
   static const int playSound = 0x03;
   static const int getBattery = 0x04;
 
-  /// UTF-8 caption for the simulator screen (M3 stand-in for TTS).
+  /// UTF-8 caption for a display (simulator screen or desk-bot OLED).
+  /// Optional on firmware without a screen: ACK and ignore. Not speech.
   static const int showText = 0x05;
 }
 
@@ -401,12 +418,20 @@ sealed class ControlMessage extends BotMessage {
       ControlCommandId.playSound => PlaySoundCommand._decodeArgs(seq, args),
       ControlCommandId.getBattery => GetBatteryCommand(sequence: seq),
       ControlCommandId.showText => ShowTextCommand._decodeArgs(seq, args),
-      _ => throw ProtocolException(
-          'unknown control command 0x${payload[0].toRadixString(16)}'),
+      _ => IgnoredControlCommand(
+          sequence: seq,
+          rawCommandId: payload[0],
+          rawArgs: Uint8List.fromList(args),
+        ),
     };
   }
 }
 
+/// Mood signature for the OLED visor face. Firmware reverse-maps
+/// (r, g, b, pattern) to a visor mood and runs the local eye engine —
+/// same signatures as `lib/bot_simulator/visor/mood_from_led.dart`. The RGB
+/// bytes are the wire encoding, not separate RGB LED pixels on v1 hardware.
+///
 /// Args: [r u8][g u8][b u8][pattern u8].
 final class SetLedCommand extends ControlMessage {
   const SetLedCommand({
@@ -441,7 +466,8 @@ final class SetLedCommand extends ControlMessage {
   }
 }
 
-/// No args. Firmware performs its one canned wiggle.
+/// No args. Firmware performs its one canned wiggle, or ACK and no-ops
+/// if the bot has no servo (minimal v1).
 final class WiggleCommand extends ControlMessage {
   const WiggleCommand({required super.sequence});
 
@@ -484,10 +510,30 @@ final class GetBatteryCommand extends ControlMessage {
   Uint8List encodeArgs() => Uint8List(0);
 }
 
+/// Unknown control command id. Receivers ACK the ATT write and ignore the
+/// payload — never an ATT error, or the companion will drop the link.
+final class IgnoredControlCommand extends ControlMessage {
+  const IgnoredControlCommand({
+    required super.sequence,
+    required this.rawCommandId,
+    required this.rawArgs,
+  });
+
+  final int rawCommandId;
+  final Uint8List rawArgs;
+
+  @override
+  int get commandId => rawCommandId;
+
+  @override
+  Uint8List encodeArgs() => rawArgs;
+}
+
 /// Phone -> bot caption. Args: [flags u8][utf-8 text…].
 ///
 /// Payload is raw UTF-8 so this file stays `dart:typed_data` only. Empty
 /// text is legal (a final with no bytes just commits whatever was streaming).
+/// Render on the OLED when present (`thinking…`, tool lines, etc.).
 final class ShowTextCommand extends ControlMessage {
   const ShowTextCommand({
     required super.sequence,
@@ -604,7 +650,7 @@ final class BatteryStatusMessage extends TelemetryMessage {
   }
 }
 
-/// Coarse bot state, mirrored to LEDs/face on real hardware. Also lets the
+/// Coarse bot state, mirrored to the OLED face on real hardware. Also lets the
 /// half-duplex rule (mic muted while speaking — see "Echo" in the brief)
 /// be protocol-visible instead of an accident of buffering.
 enum BotState {

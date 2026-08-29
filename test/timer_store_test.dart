@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:cute_bot/companion/brain/transcript.dart';
 import 'package:cute_bot/companion/service/timer_store.dart';
+import 'package:cute_bot/shared/timer_display.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -17,6 +20,33 @@ void main() {
       expect(decoded.minutes, 3);
       expect(decoded.label, 'tea');
       expect(decoded.firesAt.millisecondsSinceEpoch, 1_700_000_000_000);
+      expect(decoded.isPaused, isFalse);
+    });
+
+    test('sub-minute durationSeconds round-trip', () {
+      final t = PendingTimer(
+        id: 't1',
+        minutes: 0,
+        label: 'rest',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000),
+        durationSeconds: 20,
+      );
+      final decoded = PendingTimer.fromMap(t.toMap());
+      expect(decoded!.totalSeconds, 20);
+      expect(decoded.minutes, 0);
+    });
+
+    test('paused map round-trip', () {
+      final t = PendingTimer(
+        id: 't1',
+        minutes: 3,
+        label: 'tea',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000),
+        pausedRemaining: const Duration(seconds: 42),
+      );
+      final decoded = PendingTimer.fromMap(t.toMap());
+      expect(decoded!.isPaused, isTrue);
+      expect(decoded.pausedRemaining, const Duration(seconds: 42));
     });
 
     test('isDueAt / remainingAt', () {
@@ -33,10 +63,138 @@ void main() {
       expect(t.remainingAt(now.add(const Duration(seconds: 9))), Duration.zero);
     });
 
+    test('pause freezes remaining; resume continues from the freeze', () {
+      final now = DateTime.fromMillisecondsSinceEpoch(1000);
+      final t = PendingTimer(
+        id: 't1',
+        minutes: 1,
+        label: 'x',
+        firesAt: now.add(const Duration(seconds: 30)),
+      );
+      final paused = t.pauseAt(now);
+      expect(paused.isPaused, isTrue);
+      expect(paused.remainingAt(now.add(const Duration(seconds: 10))),
+          const Duration(seconds: 30));
+      expect(paused.isDueAt(now.add(const Duration(hours: 1))), isFalse);
+      final later = now.add(const Duration(seconds: 10));
+      final resumed = paused.resumeAt(later);
+      expect(resumed.isPaused, isFalse);
+      expect(resumed.remainingAt(later), const Duration(seconds: 30));
+      expect(resumed.isDueAt(later.add(const Duration(seconds: 30))), isTrue);
+    });
+
     test('rejects garbage', () {
       expect(PendingTimer.fromMap(null), isNull);
       expect(PendingTimer.fromMap({'id': 't', 'minutes': 0, 'label': 'x', 'firesAt': 1}),
           isNull);
+      expect(
+        PendingTimer.fromMap({
+          'id': 't',
+          'minutes': 0,
+          'label': 'x',
+          'firesAt': 1,
+          'durationSeconds': 20,
+        })?.totalSeconds,
+        20,
+      );
+    });
+  });
+
+  group('formatTimerCountdown', () {
+    test('formats HH:MM:SS remaining', () {
+      final now = DateTime.fromMillisecondsSinceEpoch(0);
+      final t = PendingTimer(
+        id: 't1',
+        minutes: 1,
+        label: '',
+        firesAt: now.add(const Duration(seconds: 5)),
+      );
+      expect(formatTimerCountdown(t, now), '00:00:05');
+      expect(
+        formatTimerCountdown(
+          PendingTimer(
+            id: 't2',
+            minutes: 1,
+            label: '',
+            firesAt: now.add(const Duration(minutes: 1)),
+          ),
+          now,
+        ),
+        '00:01:00',
+      );
+      expect(
+        formatTimerCountdown(
+          PendingTimer(
+            id: 't3',
+            minutes: 180,
+            label: '',
+            firesAt: now.add(const Duration(minutes: 180)),
+          ),
+          now,
+        ),
+        '03:00:00',
+      );
+    });
+
+    test('isTimerDisplayText matches wire shape', () {
+      expect(isTimerDisplayText('00:04:59'), isTrue);
+      expect(isTimerDisplayText('03:00:00'), isTrue);
+      expect(isTimerDisplayText('thinking…'), isFalse);
+      expect(isTimerDisplayText('set_timer(1, tea)'), isFalse);
+    });
+
+    test('soonestPendingTimer picks earliest firesAt', () {
+      final a = PendingTimer(
+        id: 'a',
+        minutes: 1,
+        label: 'a',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(200),
+      );
+      final b = PendingTimer(
+        id: 'b',
+        minutes: 1,
+        label: 'b',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(100),
+      );
+      expect(soonestPendingTimer([a, b])?.id, 'b');
+      expect(soonestPendingTimer(const []), isNull);
+    });
+
+    test('soonestPendingTimer skips paused timers', () {
+      final running = PendingTimer(
+        id: 'run',
+        minutes: 1,
+        label: 'a',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(200),
+      );
+      final paused = PendingTimer(
+        id: 'pause',
+        minutes: 1,
+        label: 'b',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(50),
+        pausedRemaining: const Duration(seconds: 9),
+      );
+      expect(soonestPendingTimer([running, paused])?.id, 'run');
+      expect(timerForDisplay([running, paused])?.id, 'run');
+      expect(timerForDisplay([paused])?.id, 'pause');
+    });
+
+    test('pickTimer prefers running, or paused when asked', () {
+      final running = PendingTimer(
+        id: 'run',
+        minutes: 1,
+        label: 'tea',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(200),
+      );
+      final paused = PendingTimer(
+        id: 'pause',
+        minutes: 1,
+        label: 'bread',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(50),
+        pausedRemaining: const Duration(seconds: 9),
+      );
+      expect(pickTimer([running, paused])?.id, 'run');
+      expect(pickTimer([running, paused], preferPaused: true)?.id, 'pause');
     });
   });
 
@@ -70,31 +228,40 @@ void main() {
         label: 'a',
         firesAt: DateTime.fromMillisecondsSinceEpoch(1),
       ));
-      await store.add(PendingTimer(
-        id: 'b',
-        minutes: 1,
-        label: 'b',
-        firesAt: DateTime.fromMillisecondsSinceEpoch(2),
-      ));
       expect((await store.remove('a'))?.id, 'a');
-      expect(await TimerStore(backing).load(), hasLength(1));
-      expect((await TimerStore(backing).load()).single.id, 'b');
+      expect(await TimerStore(backing).load(), isEmpty);
+    });
+
+    test('update persists a pause across load', () async {
+      final backing = InMemoryKeyValueStore();
+      final store = TimerStore(backing);
+      await store.load();
+      final timer = PendingTimer(
+        id: 'a',
+        minutes: 1,
+        label: 'tea',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(50_000),
+      );
+      await store.add(timer);
+      await store.update(timer.pauseAt(DateTime.fromMillisecondsSinceEpoch(20_000)));
+      final recovered = await TimerStore(backing).load();
+      expect(recovered.single.isPaused, isTrue);
+      expect(recovered.single.pausedRemaining, const Duration(seconds: 30));
     });
 
     test('caps at maxPending', () async {
+      expect(TimerStore.maxPending, 1);
       final store = TimerStore(InMemoryKeyValueStore());
       await store.load();
-      for (var i = 0; i < TimerStore.maxPending; i++) {
-        expect(
-          await store.add(PendingTimer(
-            id: 't$i',
-            minutes: 1,
-            label: 'n',
-            firesAt: DateTime.fromMillisecondsSinceEpoch(i),
-          )),
-          isTrue,
-        );
-      }
+      expect(
+        await store.add(PendingTimer(
+          id: 't0',
+          minutes: 1,
+          label: 'n',
+          firesAt: DateTime.fromMillisecondsSinceEpoch(0),
+        )),
+        isTrue,
+      );
       expect(
         await store.add(PendingTimer(
           id: 'overflow',
@@ -104,7 +271,33 @@ void main() {
         )),
         isFalse,
       );
-      expect(store.pending, hasLength(TimerStore.maxPending));
+      expect(store.pending, hasLength(1));
+      expect(store.pending.single.id, 't0');
+    });
+
+    test('load of many timers keeps one and persists the trim', () async {
+      final backing = InMemoryKeyValueStore();
+      final early = PendingTimer(
+        id: 'early',
+        minutes: 1,
+        label: 'tea',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(100),
+      );
+      final later = PendingTimer(
+        id: 'later',
+        minutes: 5,
+        label: 'bread',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(500),
+      );
+      backing.values[TimerStore.storageKey] =
+          jsonEncode([early.toMap(), later.toMap()]);
+      final store = TimerStore(backing);
+      final loaded = await store.load();
+      expect(loaded, hasLength(1));
+      expect(loaded.single.id, 'early');
+      final again = await TimerStore(backing).load();
+      expect(again, hasLength(1));
+      expect(again.single.id, 'early');
     });
 
     test('corrupt data recovers empty', () async {
