@@ -21,6 +21,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import '../shared/ble_protocol.dart';
 import '../shared/log.dart';
 import 'companion_device_link.dart';
+import 'debug_flags.dart';
 import 'oem_care.dart';
 import 'service/bot_service.dart';
 import 'service/service_ipc.dart';
@@ -460,8 +461,8 @@ final class CompanionController extends ChangeNotifier {
 
   void getBattery() => _send(const GetBatteryUiCommand());
 
-  void toggleLiveMonitor() =>
-      _send(SetLiveMonitorUiCommand(!(snapshot?.liveMonitor ?? true)));
+  void toggleLiveMonitor() => _send(
+      SetLiveMonitorUiCommand(!(snapshot?.liveMonitor ?? kLiveMonitorDefault)));
 
   void setPhoneAlerts(bool enabled) =>
       _send(SetPhoneAlertsUiCommand(enabled));

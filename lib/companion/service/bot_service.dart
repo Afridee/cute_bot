@@ -31,6 +31,7 @@ import '../brain/gemma_brain.dart';
 import '../brain/hybrid_brain.dart';
 import '../brain/sherpa_clip_asr.dart';
 import '../brain/transcript.dart';
+import '../debug_flags.dart';
 import '../expressions.dart';
 import 'bot_body.dart';
 import 'notification_text.dart';
@@ -64,7 +65,7 @@ final class BotTaskHandler extends TaskHandler {
   final DateTime _startedAt = DateTime.now();
 
   // Audio diagnostics (same numbers the M1 debug panel showed).
-  bool _liveMonitor = true;
+  bool _liveMonitor = kLiveMonitorDefault;
   bool _playbackReady = false;
   bool _receivingUtterance = false;
   DateTime? _utteranceFirstArrival;
