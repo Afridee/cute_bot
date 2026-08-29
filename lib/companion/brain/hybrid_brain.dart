@@ -9,6 +9,7 @@ import '../../shared/log.dart';
 import 'bot_brain.dart';
 import 'clip_asr.dart';
 import 'fast_intent.dart';
+import 'fast_intent_overlay.dart';
 import 'gemma_brain.dart';
 import 'latency_trace.dart';
 
@@ -21,6 +22,7 @@ final class HybridBrain implements BotBrain {
     this.asr,
     this.onHeard,
     this.onRoute,
+    this.overlay,
   });
 
   final BotBrain inner;
@@ -41,6 +43,10 @@ final class HybridBrain implements BotBrain {
     String? text,
     String? reason,
   })? onRoute;
+
+  /// Per-user ASR substitutions. Null = defaults only. Reloaded after
+  /// enrollment save without reconstructing the brain.
+  FastIntentOverlay? overlay;
 
   /// Last ASR transcript, if any. Not a cue.
   String? lastHeardText;
@@ -65,7 +71,7 @@ final class HybridBrain implements BotBrain {
     if (text != null && text.isNotEmpty) {
       lastHeardText = text;
       onHeard?.call(text);
-      final hit = matchText(text);
+      final hit = matchText(text, overlay);
       if (hit != null) {
         yield* _emitHit(hit, watch, heard: text);
         return;
@@ -80,13 +86,20 @@ final class HybridBrain implements BotBrain {
   @override
   Stream<BrainEvent> respondToCue(String cue, ConversationContext ctx) async* {
     final watch = Stopwatch()..start();
-    final hit = matchText(cue);
+    final hit = matchText(cue, overlay);
     if (hit != null) {
       yield* _emitHit(hit, watch, heard: cue);
       return;
     }
     _logRoute(fastIntent: false, text: cue);
     yield* _forward(inner.respondToCue(cue, ctx));
+  }
+
+  /// ASR only — enrollment path. No matcher, no tools, no Gemma.
+  Future<String?> transcribeOnly(AudioClip audio) async {
+    final clipAsr = asr;
+    if (clipAsr == null) return null;
+    return clipAsr.transcribe(audio);
   }
 
   Stream<BrainEvent> _emitHit(

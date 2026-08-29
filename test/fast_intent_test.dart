@@ -1,4 +1,5 @@
 import 'package:cute_bot/companion/brain/fast_intent.dart';
+import 'package:cute_bot/companion/brain/fast_intent_overlay.dart';
 import 'package:cute_bot/companion/expressions.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -96,9 +97,8 @@ void main() {
       expect(matchText('set a timer for three and a half hours'), isNull);
     });
 
-    test('wake me up in twenty minutes', () {
-      final call = matchText('wake me up in twenty minutes')!.calls.single;
-      expect(call.arguments['minutes'], 20);
+    test('wake me up without a timer word is a miss', () {
+      expect(matchText('wake me up in twenty minutes'), isNull);
     });
 
     test('countdown ten minutes', () {
@@ -139,11 +139,6 @@ void main() {
     test('remind me in 15 seconds', () {
       expect(matchText('remind me in 15 seconds')!.calls.single.arguments['seconds'],
           15);
-    });
-
-    test('time me for 10 seconds', () {
-      expect(matchText('time me for 10 seconds')!.calls.single.arguments['seconds'],
-          10);
     });
 
     test('ASR near-miss diamer still sets seconds', () {
@@ -226,23 +221,17 @@ void main() {
           'cancel_timer()');
     });
 
-    test('kill the timer is cancel', () {
-      expect(matchText('kill the timer')!.reason, 'cancel-timer');
-    });
-
-    test('forget the tea timer keeps the label', () {
-      expect(matchText('forget the tea timer')!.calls.single.arguments['label'],
-          'tea');
+    test('kill / forget / hold / freeze stay misses until enrolled', () {
+      expect(matchText('kill the timer'), isNull);
+      expect(matchText('forget the tea timer'), isNull);
+      expect(matchText('hold the timer'), isNull);
+      expect(matchText('freeze the timer'), isNull);
     });
 
     test('cancel the tea timer keeps the label', () {
       final call = matchText('cancel the tea timer')!.calls.single;
       expect(call.name, 'cancel_timer');
       expect(call.arguments['label'], 'tea');
-    });
-
-    test('freeze the timer is pause', () {
-      expect(matchText('freeze the timer')!.reason, 'pause-timer');
     });
 
     test('pause the tea timer', () {
@@ -265,6 +254,60 @@ void main() {
 
     test('unpause the countdown', () {
       expect(matchText('unpause the countdown')!.reason, 'resume-timer');
+    });
+
+    test('canceled the timer is cancel (past tense)', () {
+      expect(matchText('canceled the timer')!.reason, 'cancel-timer');
+      expect(matchText('cancelled the timer')!.reason, 'cancel-timer');
+    });
+
+    test('paused / resumed the timer use inflections', () {
+      expect(matchText('paused the timer')!.reason, 'pause-timer');
+      expect(matchText('resumed the timer')!.reason, 'resume-timer');
+    });
+
+    test('ASR canseled the timer is cancel, not a label', () {
+      final hit = matchText('CANSELED THE TIMER');
+      expect(hit, isNotNull);
+      expect(hit!.reason, 'cancel-timer');
+      expect(hit.calls.single.transcriptLine, 'cancel_timer()');
+    });
+
+    test('CANSELED THE DIAMOND is cancel, not resume of label CANSELED', () {
+      const overlay = FastIntentOverlay(intents: {
+        FastIntentId.resumeTimer: FastIntentAliases(
+          phrases: ['resumed the diamond', 'the diamond'],
+          verb: ['resumed'],
+          noun: ['diamond'],
+        ),
+      });
+      final cancel = matchText('CANSELED THE DIAMOND', overlay);
+      expect(cancel, isNotNull);
+      expect(cancel!.reason, 'cancel-timer');
+      expect(cancel.calls.single.transcriptLine, 'cancel_timer()');
+      expect(
+        matchText('RESUMED THE DIAMOND', overlay)!.calls.single.transcriptLine,
+        'resume_timer()',
+      );
+      expect(matchText('THE DIAMOND', overlay), isNull);
+    });
+
+    test('WAS THE DIAMOND pauses via was-cue × shared noun, not resume', () {
+      const overlay = FastIntentOverlay(intents: {
+        FastIntentId.pauseTimer: FastIntentAliases(
+          phrases: ['was the temper'],
+          noun: ['temper'],
+        ),
+        FastIntentId.resumeTimer: FastIntentAliases(
+          phrases: ['resumed the diamond', 'the diamond'],
+          verb: ['resumed'],
+          noun: ['diamond'],
+        ),
+      });
+      final hit = matchText('WAS THE DIAMOND', overlay);
+      expect(hit, isNotNull);
+      expect(hit!.reason, 'pause-timer');
+      expect(hit.calls.single.transcriptLine, 'pause_timer()');
     });
   });
 
@@ -339,8 +382,8 @@ void main() {
           matchText('surprise!')!.calls.single.arguments['mood'], 'startled');
     });
 
-    test('boogie is a dance, not a startle', () {
-      expect(matchText('boogie time')!.reason, 'dance');
+    test('boogie is a miss until the LLM', () {
+      expect(matchText('boogie time'), isNull);
     });
   });
 
@@ -423,32 +466,23 @@ void main() {
     });
   });
 
-  group('expanded keywords', () {
+  group('canonical extras', () {
     test('are you charged → get_battery', () {
       expect(matchText('are you charged?')!.calls.single.transcriptLine,
           'get_battery()');
     });
 
-    test('running low → get_battery', () {
-      expect(matchText('running low?')!.reason, 'battery');
-    });
-
-    test('shake it → delighted', () {
-      expect(matchText('shake it!')!.calls.single.arguments['mood'],
-          'delighted');
-    });
-
-    test("you're adorable → love", () {
-      expect(matchText("you're adorable")!.calls.single.arguments['mood'],
-          'love');
+    test('running low / juice / howdy / shake stay misses', () {
+      expect(matchText('running low?'), isNull);
+      expect(matchText('juice left'), isNull);
+      expect(matchText('howdy'), isNull);
+      expect(matchText('shake it!'), isNull);
+      expect(matchText("you're adorable"), isNull);
+      expect(matchText('love ya'), isNull);
     });
 
     test('i missed you → love', () {
       expect(matchText('i missed you')!.reason, 'affection');
-    });
-
-    test('love ya → love', () {
-      expect(matchText('love ya')!.calls.single.arguments['mood'], 'love');
     });
 
     test('good evening → curious', () {
@@ -459,9 +493,21 @@ void main() {
     test("what's up → curious", () {
       expect(matchText("what's up")!.reason, 'greeting');
     });
+  });
 
-    test('howdy → curious', () {
-      expect(matchText('howdy')!.calls.single.arguments['mood'], 'curious');
+  group('overlay', () {
+    test('enrolled pause phrase hits; unrelated was-the does not', () {
+      const overlay = FastIntentOverlay(intents: {
+        FastIntentId.pauseTimer: FastIntentAliases(
+          phrases: ['was the temper'],
+          verb: ['pose', 'pros'],
+          noun: ['temper', 'tamper'],
+        ),
+      });
+      expect(matchText('WAS THE TEMPER BZZ', overlay)!.reason, 'pause-timer');
+      expect(matchText('I was the one who set the timer', overlay)?.reason,
+          isNot('pause-timer'));
+      expect(matchText('pause the timer', overlay)!.reason, 'pause-timer');
     });
   });
 

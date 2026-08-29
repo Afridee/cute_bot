@@ -26,6 +26,8 @@ void main() {
         RetryBrainUiCommand(),
         SetPhoneAlertsUiCommand(false),
         PhoneAlertUiCommand(packageName: 'com.whatsapp', category: 'msg'),
+        SetVoiceEnrollUiCommand(true),
+        SaveVoiceEnrollUiCommand(overlayJson: '{"version":1}'),
       ];
       for (final command in commands) {
         final decoded = UiCommand.fromMap(command.toMap());
@@ -60,6 +62,16 @@ void main() {
               const SetPhoneAlertsUiCommand(false).toMap())
           as SetPhoneAlertsUiCommand;
       expect(alerts.enabled, isFalse);
+
+      final enroll = UiCommand.fromMap(
+              const SetVoiceEnrollUiCommand(true).toMap())
+          as SetVoiceEnrollUiCommand;
+      expect(enroll.enabled, isTrue);
+
+      final save = UiCommand.fromMap(const SaveVoiceEnrollUiCommand(
+              overlayJson: '{"version":1}')
+          .toMap()) as SaveVoiceEnrollUiCommand;
+      expect(save.overlayJson, '{"version":1}');
     });
 
     test('phoneAlert map as sent by the native listener decodes', () {
@@ -139,6 +151,10 @@ void main() {
                 timestamp: DateTime.fromMillisecondsSinceEpoch(1500)),
           ],
           activity: const ['12:00:01 Utterance: 120 frames'],
+          voiceEnrollActive: true,
+          lastEnrollTranscript: 'WAS THE TEMPER',
+          enrollSeq: 3,
+          voiceEnrollHasOverlay: true,
         );
 
       test('full snapshot round-trips', () {
@@ -169,6 +185,10 @@ void main() {
         expect(s.lastEcho!.wallMillis, 2300);
         expect(s.transcript.single.text, '(voice, 2.4 s)');
         expect(s.activity.single, contains('120 frames'));
+        expect(s.voiceEnrollActive, isTrue);
+        expect(s.lastEnrollTranscript, 'WAS THE TEMPER');
+        expect(s.enrollSeq, 3);
+        expect(s.voiceEnrollHasOverlay, isTrue);
       });
 
     test('non-snapshot input decodes to null', () {
@@ -190,6 +210,10 @@ void main() {
       expect(minimal.lastReceive, isNull);
       expect(minimal.transcript, isEmpty);
       expect(minimal.activity, isEmpty);
+      expect(minimal.voiceEnrollActive, isFalse);
+      expect(minimal.lastEnrollTranscript, isEmpty);
+      expect(minimal.enrollSeq, 0);
+      expect(minimal.voiceEnrollHasOverlay, isFalse);
     });
 
     test('unknown enum names fall back instead of throwing', () {

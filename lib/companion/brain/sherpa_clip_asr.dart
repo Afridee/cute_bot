@@ -1,9 +1,10 @@
-/// On-device ASR for BLE utterances (sherpa-onnx zipformer-small English).
+/// On-device ASR for BLE utterances (sherpa-onnx Whisper base.en).
 ///
 /// The companion already has a complete 16 kHz clip, so this is offline
 /// (non-streaming) decode on CPU — it must not fight LiteRT for the GPU.
-/// ~28 MB int8 files, downloaded once next to the Gemma bundle. A failed
-/// warm-up is non-fatal: [transcribe] returns null and Gemma still hears.
+/// ~161 MB int8 (encoder + decoder), English, downloaded once next to
+/// the Gemma bundle. A failed warm-up is non-fatal: [transcribe] returns
+/// null and Gemma still hears.
 library;
 
 import 'dart:io';
@@ -22,30 +23,31 @@ import 'pcm16.dart';
 const String _tag = 'ClipAsr';
 
 const String kAsrRepo =
-    'https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-small-en-2023-06-26/resolve/main';
+    'https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base.en/resolve/main';
 
 const _AsrFile _encoderFile = _AsrFile(
-  name: 'encoder-epoch-99-avg-1.int8.onnx',
+  name: 'base.en-encoder.int8.onnx',
   minBytes: 20000000,
 );
 const _AsrFile _decoderFile = _AsrFile(
-  name: 'decoder-epoch-99-avg-1.int8.onnx',
-  minBytes: 1000000,
-);
-const _AsrFile _joinerFile = _AsrFile(
-  name: 'joiner-epoch-99-avg-1.int8.onnx',
-  minBytes: 200000,
+  name: 'base.en-decoder.int8.onnx',
+  minBytes: 100000000,
 );
 const _AsrFile _tokensFile = _AsrFile(
-  name: 'tokens.txt',
-  minBytes: 1000,
+  name: 'base.en-tokens.txt',
+  minBytes: 100000,
 );
 
 const List<_AsrFile> _asrFiles = [
   _encoderFile,
   _decoderFile,
-  _joinerFile,
   _tokensFile,
+];
+
+const List<String> _legacyCacheFolders = [
+  'zipformer-small-en',
+  'zipformer-gigaspeech-en',
+  'whisper-tiny-en',
 ];
 
 final class _AsrFile {
@@ -78,7 +80,7 @@ final class SherpaClipAsr implements ClipAsr {
       final dir = Directory(p.join(
         (await getApplicationDocumentsDirectory()).path,
         'asr',
-        'zipformer-small-en',
+        'whisper-base-en',
       ));
       await dir.create(recursive: true);
       final token = downloadTokenForModelUrl(baseUrl);
@@ -96,12 +98,14 @@ final class SherpaClipAsr implements ClipAsr {
       if (_disposed) return;
 
       final model = sherpa.OfflineModelConfig(
-        transducer: sherpa.OfflineTransducerModelConfig(
+        whisper: sherpa.OfflineWhisperModelConfig(
           encoder: p.join(dir.path, _encoderFile.name),
           decoder: p.join(dir.path, _decoderFile.name),
-          joiner: p.join(dir.path, _joinerFile.name),
+          language: 'en',
+          task: 'transcribe',
         ),
         tokens: p.join(dir.path, _tokensFile.name),
+        modelType: 'whisper',
         numThreads: 2,
         debug: false,
         provider: 'cpu',
@@ -110,13 +114,30 @@ final class SherpaClipAsr implements ClipAsr {
         sherpa.OfflineRecognizerConfig(model: model),
       );
       _warm = true;
-      Log.i(_tag, 'zipformer-small-en ready');
+      Log.i(_tag, 'whisper-base-en ready');
+      await _deleteLegacyCaches(dir.parent);
     } catch (e, stack) {
       Log.w(_tag, 'warm-up failed; spoken turns stay on Gemma: $e');
       Log.w(_tag, '$stack');
       _recognizer?.free();
       _recognizer = null;
       _warm = false;
+    }
+  }
+
+  /// Best-effort: leftover zipformer / tiny.en weights cannot be reused
+  /// and should not sit on the phone.
+  Future<void> _deleteLegacyCaches(Directory asrDir) async {
+    for (final name in _legacyCacheFolders) {
+      try {
+        final legacy = Directory(p.join(asrDir.path, name));
+        if (await legacy.exists()) {
+          await legacy.delete(recursive: true);
+          Log.i(_tag, 'removed leftover asr/$name');
+        }
+      } catch (e) {
+        Log.w(_tag, 'could not remove leftover $name: $e');
+      }
     }
   }
 

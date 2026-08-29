@@ -593,6 +593,10 @@ class _BrainGroup extends StatelessWidget {
                   ? controller.simulateUtterance
                   : null,
             ),
+            NdButton.secondary(
+              label: 'Teach how you sound',
+              onPressed: controller.beginVoiceReenroll,
+            ),
           ],
         ),
       ],

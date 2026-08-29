@@ -9,6 +9,7 @@ library;
 
 import '../expressions.dart';
 import 'bot_brain.dart';
+import 'fast_intent_overlay.dart';
 
 /// One conservative match. [calls] is what the body should run, in order.
 final class FastIntentHit {
@@ -21,19 +22,20 @@ final class FastIntentHit {
 /// Parse [text] (a cue, or a future ASR transcript). Null = let the LLM go.
 ///
 /// Checks run narrow-to-broad: tool intents first, then specific moods,
-/// with the catch-all greeting (`hey`/`hi`/...) last.
-FastIntentHit? matchText(String text) {
+/// with the catch-all greeting (`hey`/`hi`) last. Optional [overlay] is
+/// additive: defaults run first; enrolled phrases/slots only if they miss.
+FastIntentHit? matchText(String text, [FastIntentOverlay? overlay]) {
   final trimmed = text.trim();
   if (trimmed.isEmpty) return null;
   final lower = trimmed.toLowerCase();
   if (_negated(lower)) return null;
 
   return _matchTimerFire(lower) ??
-      _matchCancelTimer(trimmed, lower) ??
-      _matchPauseTimer(trimmed, lower) ??
-      _matchResumeTimer(trimmed, lower) ??
-      _matchSetTimer(trimmed, lower) ??
-      _matchBattery(lower) ??
+      _matchCancelTimer(trimmed, lower, overlay) ??
+      _matchPauseTimer(trimmed, lower, overlay) ??
+      _matchResumeTimer(trimmed, lower, overlay) ??
+      _matchSetTimer(trimmed, lower, overlay) ??
+      _matchBattery(lower, overlay) ??
       _matchCapabilityNo(lower) ??
       _matchDance(lower) ??
       _matchPlay(lower) ??
@@ -46,6 +48,46 @@ FastIntentHit? matchText(String text) {
       _matchFarewell(lower) ??
       _matchGreeting(lower);
 }
+
+/// Canonical lemmas plus inflections. Synonyms and ASR stand-ins belong
+/// on the enrolled overlay, not here.
+const _pauseVerbs = [
+  'pause',
+  'paused',
+  'pausing',
+];
+const _cancelVerbs = [
+  'cancel',
+  'canceled',
+  'cancelled',
+  'canceling',
+  'cancelling',
+  'stop',
+  'stopped',
+  'stopping',
+];
+const _resumeVerbs = [
+  'resume',
+  'resumed',
+  'resuming',
+  'unpause',
+  'unpaused',
+  'unpausing',
+  'continue',
+  'continued',
+  'continuing',
+  'start',
+  'started',
+  'starting',
+];
+const _timerNouns = ['timer', 'countdown'];
+const _timerControlIds = [
+  FastIntentId.pauseTimer,
+  FastIntentId.cancelTimer,
+  FastIntentId.resumeTimer,
+  FastIntentId.setTimer,
+];
+const _phraseFillers = {'the', 'a', 'an', 'my', 'this', 'that'};
 
 /// Battery percent → the mood the persona asks for after `get_battery`.
 BotMood moodFromBatteryPercent(Object? percent) {
@@ -73,63 +115,81 @@ FastIntentHit? _matchTimerFire(String lower) {
   return null;
 }
 
-FastIntentHit? _matchCancelTimer(String original, String lower) {
-  if (!RegExp(
-    r'\b(?:cancel|stop|clear|delete|kill|dismiss|drop|forget)\b.{0,40}\b(?:timer|countdown)\b'
-    r'|\bturn\s+off\b.{0,20}\b(?:timer|countdown)\b',
-  ).hasMatch(lower)) {
+FastIntentHit? _matchCancelTimer(
+  String original,
+  String lower,
+  FastIntentOverlay? overlay,
+) {
+  if (!_controlHit(
+    lower,
+    overlay,
+    FastIntentId.cancelTimer,
+    _cancelVerbs,
+    extraRegex: r'\bturn\s+off\b.{0,20}\b(?:timer|countdown)\b',
+  )) {
     return null;
   }
-  final label = _timerControlLabel(original);
+  final label = _timerControlLabel(original, overlay);
   return FastIntentHit(
     [
       ToolCall('cancel_timer', {
-        if (label != null) 'label': label,
+        'label': ?label,
       }),
     ],
     reason: 'cancel-timer',
   );
 }
 
-FastIntentHit? _matchPauseTimer(String original, String lower) {
-  if (!RegExp(
-    r'\b(?:pause|hold|freeze)\b.{0,40}\b(?:timer|countdown)\b',
-  ).hasMatch(lower)) {
+FastIntentHit? _matchPauseTimer(
+  String original,
+  String lower,
+  FastIntentOverlay? overlay,
+) {
+  if (!_controlHit(lower, overlay, FastIntentId.pauseTimer, _pauseVerbs)) {
     return null;
   }
-  final label = _timerControlLabel(original);
+  final label = _timerControlLabel(original, overlay);
   return FastIntentHit(
     [
       ToolCall('pause_timer', {
-        if (label != null) 'label': label,
+        'label': ?label,
       }),
     ],
     reason: 'pause-timer',
   );
 }
 
-FastIntentHit? _matchResumeTimer(String original, String lower) {
+FastIntentHit? _matchResumeTimer(
+  String original,
+  String lower,
+  FastIntentOverlay? overlay,
+) {
   // A duration means set, not resume ("start the timer for 5 minutes").
   if (_parseDurationAndLabel(original, lower) != null) return null;
-  if (!RegExp(
-    r'\b(?:resume|unpause|continue)\b.{0,40}\b(?:timer|countdown)\b'
-    r'|\bstart\s+(?:the\s+)?(?:timer|countdown)\b',
-  ).hasMatch(lower)) {
+  if (!_controlHit(lower, overlay, FastIntentId.resumeTimer, _resumeVerbs)) {
     return null;
   }
-  final label = _timerControlLabel(original);
+  final label = _timerControlLabel(original, overlay);
   return FastIntentHit(
     [
       ToolCall('resume_timer', {
-        if (label != null) 'label': label,
+        'label': ?label,
       }),
     ],
     reason: 'resume-timer',
   );
 }
 
-FastIntentHit? _matchSetTimer(String original, String lower) {
-  if (!_looksLikeSetTimer(lower)) return null;
+FastIntentHit? _matchSetTimer(
+  String original,
+  String lower,
+  FastIntentOverlay? overlay,
+) {
+  final aliases = overlay?.of(FastIntentId.setTimer);
+  final defaultLook = _looksLikeSetTimer(lower);
+  final overlayLook =
+      aliases != null && _overlayPhraseHits(lower, aliases.phrases);
+  if (!defaultLook && !overlayLook) return null;
 
   final parsed = _parseDurationAndLabel(original, lower);
   if (parsed == null) return null;
@@ -156,15 +216,13 @@ FastIntentHit? _matchSetTimer(String original, String lower) {
 /// (ASR: diamer, dimer, tymer) also counts; still needs a duration.
 bool _looksLikeSetTimer(String lower) {
   if (RegExp(
-    r'\b(?:set|start|make|create|put|give\s+me|need|want)\b'
+    r'\b(?:set|start|make)\b'
     r'.{0,40}\b(?:a\s+)?(?:timer|countdown|alarm)\b'
     r'|\b(?:timer|countdown|alarm)\s+(?:for|of|in|to)\b'
     r'|\b(?:timer|countdown)\b.{0,24}\b(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\b'
     r'|\b(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\b.{0,16}\b(?:timer|countdown)\b'
     r'|\bremind\s+me\b'
-    r'|\bcount\s?down\b'
-    r'|\bwake\s+me\b'
-    r'|\btime\s+me\b',
+    r'|\bcount\s?down\b',
   ).hasMatch(lower)) {
     return true;
   }
@@ -174,14 +232,18 @@ bool _looksLikeSetTimer(String lower) {
 /// Zipformer often drops or swaps a letter in "timer". Distance 0 is
 /// already covered above; 1–2 on a short token is the ASR near-miss.
 bool _hasNearMissTimerNoun(String lower) {
-  const target = 'timer';
-  for (final token in lower.split(RegExp(r'[^a-z]+'))) {
-    if (token.length < 4 || token.length > 7) continue;
-    if (token == target) continue;
-    final d = _editDistance(token, target);
-    if (d >= 1 && d <= 2) return true;
+  for (final token in tokenizeUtterance(lower)) {
+    if (_tokenIsNearMissTimer(token)) return true;
   }
   return false;
+}
+
+bool _tokenIsNearMissTimer(String token) {
+  const target = 'timer';
+  if (token.length < 4 || token.length > 7) return false;
+  if (token == target) return false;
+  final d = _editDistance(token, target);
+  return d >= 1 && d <= 2;
 }
 
 int _editDistance(String a, String b) {
@@ -208,17 +270,176 @@ int _editDistance(String a, String b) {
   return prev[n];
 }
 
-FastIntentHit? _matchBattery(String lower) {
+FastIntentHit? _matchBattery(String lower, FastIntentOverlay? overlay) {
   if (RegExp(
-    r'\b(?:battery|charged?|how much power|power left'
-    r'|juice left|running low)\b',
+    r'\b(?:battery|charged?|how much power|power left)\b',
   ).hasMatch(lower)) {
     return const FastIntentHit(
       [ToolCall('get_battery', {})],
       reason: 'battery',
     );
   }
+  final aliases = overlay?.of(FastIntentId.battery);
+  if (aliases != null && _overlayPhraseHits(lower, aliases.phrases)) {
+    return const FastIntentHit(
+      [ToolCall('get_battery', {})],
+      reason: 'battery',
+    );
+  }
   return null;
+}
+
+bool _controlHit(
+  String lower,
+  FastIntentOverlay? overlay,
+  FastIntentId id,
+  List<String> defaultVerbs, {
+  String? extraRegex,
+}) {
+  final verbAlt = defaultVerbs.map(RegExp.escape).join('|');
+  final nounAlt = _timerNouns.map(RegExp.escape).join('|');
+  if (RegExp('\\b(?:$verbAlt)\\b.{0,40}\\b(?:$nounAlt)\\b').hasMatch(lower)) {
+    return true;
+  }
+  if (extraRegex != null && RegExp(extraRegex).hasMatch(lower)) return true;
+  final extraNouns = _timerOverlayNouns(overlay);
+  if (_overlayControlHits(
+    lower,
+    overlay?.of(id),
+    defaultVerbs,
+    extraNouns: extraNouns,
+  )) {
+    return true;
+  }
+  return _fuzzyControlHit(lower, defaultVerbs, extraNouns);
+}
+
+List<String> _timerOverlayNouns(FastIntentOverlay? overlay) {
+  if (overlay == null) return const [];
+  return [
+    for (final id in _timerControlIds) ...overlay.of(id).noun,
+  ];
+}
+
+/// Enrolled phrase as a token span, or overlay-verb × overlay-noun /
+/// overlay-verb × default noun / default-verb × overlay-noun.
+///
+/// Timer nouns enrolled on any control intent count for all of them
+/// ("diamond" from resume still pairs with cancel). Phrases that are
+/// only a determiner plus a timer noun ("the diamond") do not fire —
+/// they would steal cancel/pause utterances that share the noun.
+bool _overlayControlHits(
+  String lower,
+  FastIntentAliases? aliases,
+  List<String> defaultVerbs, {
+  List<String> extraNouns = const [],
+}) {
+  final overlayVerbs = aliases?.verb ?? const [];
+  final overlayNouns = aliases?.noun ?? const [];
+  final nouns = [...overlayNouns, ...extraNouns];
+  final phrases = aliases?.phrases ?? const [];
+  if (_overlayPhraseHits(lower, phrases, weakNouns: nouns)) return true;
+  // Distinctive phrase tokens (`was` in `was the temper`) × overlay nouns,
+  // including nouns enrolled on a sibling intent. Never × default
+  // timer/countdown — `I was the one who set the timer` must not pause.
+  if (_slotPairHits(lower, _phraseCueTokens(phrases, nouns), nouns)) {
+    return true;
+  }
+  if (_slotPairHits(lower, overlayVerbs, nouns)) return true;
+  if (_slotPairHits(lower, overlayVerbs, _timerNouns)) return true;
+  if (_slotPairHits(lower, defaultVerbs, nouns)) return true;
+  return false;
+}
+
+List<String> _phraseCueTokens(List<String> phrases, List<String> nouns) {
+  final weak = {
+    ..._phraseFillers,
+    ..._timerNouns,
+    for (final n in nouns) n.toLowerCase(),
+  };
+  final cues = <String>[];
+  for (final phrase in phrases) {
+    for (final t in tokenizeUtterance(phrase)) {
+      if (weak.contains(t) || cues.contains(t)) continue;
+      cues.add(t);
+    }
+  }
+  return cues;
+}
+
+bool _overlayPhraseHits(
+  String lower,
+  List<String> phrases, {
+  Iterable<String> weakNouns = const [],
+}) {
+  if (phrases.isEmpty) return false;
+  final hay = tokenizeUtterance(lower);
+  final weak = {
+    ..._phraseFillers,
+    ..._timerNouns,
+    for (final n in weakNouns) n.toLowerCase(),
+  };
+  for (final phrase in phrases) {
+    final ned = tokenizeUtterance(phrase);
+    if (ned.isEmpty || hay.length < ned.length) continue;
+    if (ned.every(weak.contains)) continue;
+    for (var i = 0; i <= hay.length - ned.length; i++) {
+      var ok = true;
+      for (var k = 0; k < ned.length; k++) {
+        if (hay[i + k] != ned[k]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return true;
+    }
+  }
+  return false;
+}
+
+/// Exact control verb, or edit-distance 1–2 on verbs of length ≥ 6
+/// (`cancel`/`canceled` → `canseled`). Short verbs stay exact-only so
+/// `stop` does not become `start`.
+bool _fuzzyControlHit(
+  String lower,
+  List<String> verbs,
+  List<String> extraNouns,
+) {
+  return _hasFuzzyControlVerb(lower, verbs) &&
+      _hasTimerNounToken(lower, extraNouns);
+}
+
+bool _hasFuzzyControlVerb(String lower, List<String> verbs) {
+  for (final token in tokenizeUtterance(lower)) {
+    if (_fuzzyVerbToken(token, verbs)) return true;
+  }
+  return false;
+}
+
+bool _fuzzyVerbToken(String token, List<String> verbs) {
+  for (final verb in verbs) {
+    if (token == verb) return true;
+    if (verb.length < 6 || token.length < 4) continue;
+    if ((token.length - verb.length).abs() > 2) continue;
+    final d = _editDistance(token, verb);
+    if (d >= 1 && d <= 2) return true;
+  }
+  return false;
+}
+
+bool _hasTimerNounToken(String lower, List<String> extraNouns) {
+  final extra = {for (final n in extraNouns) n.toLowerCase()};
+  for (final token in tokenizeUtterance(lower)) {
+    if (_timerNouns.contains(token) || extra.contains(token)) return true;
+  }
+  return false;
+}
+
+bool _slotPairHits(String lower, List<String> verbs, List<String> nouns) {
+  if (verbs.isEmpty || nouns.isEmpty) return false;
+  final v = verbs.map(RegExp.escape).join('|');
+  final n = nouns.map(RegExp.escape).join('|');
+  return RegExp('\\b($v)\\b.{0,40}\\b($n)\\b').hasMatch(lower);
 }
 
 /// The persona says the bot must `express(no)` when asked to do something
@@ -240,8 +461,7 @@ FastIntentHit? _matchCapabilityNo(String lower) {
 
 FastIntentHit? _matchDance(String lower) {
   if (RegExp(
-    r'\b(?:dance|wiggle|spin|shake|boogie|bust a move|show me a move'
-    r'|do a (?:little )?trick|do a (?:little )?dance)\b',
+    r'\b(?:dance|wiggle|do a (?:little )?dance)\b',
   ).hasMatch(lower)) {
     return const FastIntentHit(
       [ToolCall('express', {'mood': 'delighted'})],
@@ -265,9 +485,7 @@ FastIntentHit? _matchPlay(String lower) {
 }
 
 FastIntentHit? _matchStartle(String lower) {
-  if (RegExp(
-    r'\bboo\b|\bsurprise\b|\bwake up\b|\blook out\b',
-  ).hasMatch(lower)) {
+  if (RegExp(r'\bboo\b|\bsurprise\b').hasMatch(lower)) {
     return const FastIntentHit(
       [ToolCall('express', {'mood': 'startled'})],
       reason: 'startle',
@@ -338,8 +556,7 @@ FastIntentHit? _matchQuiet(String lower) {
 
 FastIntentHit? _matchAffection(String lower) {
   if (RegExp(
-    r"\b(?:love you|i love you|love ya|you're cute|you are cute"
-    r'|cutie|adorable|sweetheart)\b'
+    r"\b(?:love you|i love you|you're cute|you are cute)\b"
     r'|\bmiss(?:ed)? you\b',
   ).hasMatch(lower)) {
     return const FastIntentHit(
@@ -388,11 +605,10 @@ FastIntentHit? _matchGreeting(String lower) {
     );
   }
   if (RegExp(
-    r"\b(?:hey|hi|hello|yo|sup|howdy)\b"
+    r"\b(?:hey|hi|hello)\b"
     r"|\byou awake\b"
     r"|\bwhat'?s up\b"
-    r"|\bgood (?:morning|evening|afternoon)\b"
-    r"|\bmorning\b",
+    r"|\bgood (?:morning|evening|afternoon)\b",
   ).hasMatch(lower)) {
     return const FastIntentHit(
       [ToolCall('express', {'mood': 'curious'})],
@@ -530,12 +746,40 @@ String _labelAfter(String original, int endInLower) {
 
 /// Leftover words after stripping cancel/pause/resume phrasing. Null when
 /// the utterance did not name a specific timer.
-String? _timerControlLabel(String original) {
+String? _timerControlLabel(String original, [FastIntentOverlay? overlay]) {
+  final extraNouns = _timerOverlayNouns(overlay);
+  final extra = <String>[
+    ...extraNouns,
+    for (final id in _timerControlIds) ...[
+      ...?overlay?.of(id).verb,
+      ..._phraseCueTokens(overlay?.of(id).phrases ?? const [], extraNouns),
+    ],
+  ];
+  final known = <String>{
+    ..._cancelVerbs,
+    ..._pauseVerbs,
+    ..._resumeVerbs,
+    ..._timerNouns,
+    'please',
+    'turn',
+    'off',
+    'again',
+    'the',
+    'my',
+    'this',
+    'a',
+    'an',
+    'for',
+    'called',
+    'labelled',
+    'labeled',
+    'named',
+    'on',
+    ...extra,
+  };
   var rest = original.replaceAll(
     RegExp(
-      r'\b(?:please|cancel|stop|clear|delete|kill|dismiss|drop|forget|pause|hold|freeze|resume|unpause|'
-      r'continue|start|turn|off|again|the|my|this|a|an|timer|countdown|'
-      r'for|called|labelled|labeled|named|on)\b',
+      '\\b(?:${known.map(RegExp.escape).join('|')})\\b',
       caseSensitive: false,
     ),
     ' ',
@@ -543,5 +787,23 @@ String? _timerControlLabel(String original) {
   rest = rest.replaceAll(RegExp(r'[^\w\s]+'), ' ');
   rest = rest.replaceAll(RegExp(r'\s+'), ' ').trim();
   if (rest.isEmpty) return null;
-  return rest;
+  final kept = [
+    for (final tok in tokenizeUtterance(rest))
+      if (!_isStrippedControlToken(tok, extra)) tok,
+  ];
+  if (kept.isEmpty) return null;
+  return kept.join(' ');
+}
+
+bool _isStrippedControlToken(String tok, List<String> extra) {
+  if (_fuzzyVerbToken(tok, _cancelVerbs) ||
+      _fuzzyVerbToken(tok, _pauseVerbs) ||
+      _fuzzyVerbToken(tok, _resumeVerbs)) {
+    return true;
+  }
+  if (_timerNouns.contains(tok) || _tokenIsNearMissTimer(tok)) return true;
+  for (final e in extra) {
+    if (tok == e) return true;
+  }
+  return false;
 }

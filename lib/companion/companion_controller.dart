@@ -24,6 +24,7 @@ import 'companion_device_link.dart';
 import 'debug_flags.dart';
 import 'oem_care.dart';
 import 'service/bot_service.dart';
+import 'service/fast_intent_store.dart';
 import 'service/service_ipc.dart';
 import 'setup/companion_setup.dart';
 
@@ -83,6 +84,9 @@ final class CompanionController extends ChangeNotifier {
   bool oemKeepAliveAcknowledged = false;
   bool oemKeepAliveSkipped = false;
   bool cdmSkipped = false;
+  bool voiceEnrollSkipped = false;
+  bool voiceEnrollHasOverlay = false;
+  bool voiceEnrollForced = false;
 
   BluetoothLowEnergyState radioState = BluetoothLowEnergyState.unknown;
 
@@ -109,9 +113,22 @@ final class CompanionController extends ChangeNotifier {
         cdmSkipped: cdmSkipped,
         brainReady: brainReady,
         fakeBrain: fakeBrain,
+        voiceEnrollSkipped: voiceEnrollSkipped,
+        voiceEnrollHasOverlay: voiceEnrollHasOverlay ||
+            (snapshot?.voiceEnrollHasOverlay ?? false),
       );
 
-  CompanionSetupStep get setupStep => resolveCompanionSetupStep(setupFacts);
+  CompanionSetupStep get setupStep {
+    if (voiceEnrollForced) {
+      final blocking = firstBlockingCompanionSetupStep(setupFacts);
+      if (blocking == CompanionSetupStep.done ||
+          blocking == CompanionSetupStep.voiceEnroll) {
+        return CompanionSetupStep.voiceEnroll;
+      }
+      return blocking;
+    }
+    return resolveCompanionSetupStep(setupFacts);
+  }
 
   bool get canStartService => notificationsGranted && bluetoothOn;
 
@@ -131,6 +148,7 @@ final class CompanionController extends ChangeNotifier {
   static const String _oemAckKey = 'oemKeepAliveAcknowledged';
   static const String _oemSkipKey = 'oemKeepAliveSkipped';
   static const String _cdmSkipKey = 'cdmSkipped';
+  static const String _voiceEnrollSkipKey = 'voiceEnrollSkipped';
 
   Future<void> start() async {
     if (_started) return;
@@ -206,6 +224,19 @@ final class CompanionController extends ChangeNotifier {
     oemKeepAliveAcknowledged = await _readFlag(_oemAckKey);
     oemKeepAliveSkipped = await _readFlag(_oemSkipKey);
     cdmSkipped = await _readFlag(_cdmSkipKey);
+    voiceEnrollSkipped = await _readFlag(_voiceEnrollSkipKey);
+    voiceEnrollHasOverlay = await _overlayPresent();
+  }
+
+  Future<bool> _overlayPresent() async {
+    try {
+      final raw = await FlutterForegroundTask.getData<String>(
+          key: FastIntentStore.storageKey);
+      return raw != null && raw.isNotEmpty;
+    } catch (e) {
+      Log.w(_tag, 'overlay read failed: $e');
+      return false;
+    }
   }
 
   Future<bool> _readFlag(String key) async {
@@ -391,6 +422,29 @@ final class CompanionController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  Future<void> skipVoiceEnroll() async {
+    voiceEnrollForced = false;
+    setVoiceEnroll(false);
+    voiceEnrollSkipped = true;
+    await _writeFlag(_voiceEnrollSkipKey, true);
+    if (!_disposed) notifyListeners();
+  }
+
+  void setVoiceEnroll(bool enabled) =>
+      _send(SetVoiceEnrollUiCommand(enabled));
+
+  void saveVoiceEnrollOverlay(String overlayJson) {
+    _send(SaveVoiceEnrollUiCommand(overlayJson: overlayJson));
+    voiceEnrollHasOverlay = true;
+    voiceEnrollForced = false;
+    if (!_disposed) notifyListeners();
+  }
+
+  void beginVoiceReenroll() {
+    voiceEnrollForced = true;
+    if (!_disposed) notifyListeners();
+  }
+
   void retryBrain() => _send(const RetryBrainUiCommand());
 
   /// Start the service once notification + Bluetooth are granted. Safe to
@@ -489,6 +543,7 @@ final class CompanionController extends ChangeNotifier {
     if (decoded == null) return;
     snapshot = decoded;
     lastSnapshotAt = DateTime.now();
+    if (decoded.voiceEnrollHasOverlay) voiceEnrollHasOverlay = true;
     if (phase != CompanionUiPhase.running) {
       // Snapshots prove the service is up regardless of our bookkeeping.
       phase = CompanionUiPhase.running;

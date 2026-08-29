@@ -59,6 +59,10 @@ sealed class UiCommand {
           packageName: raw['pkg'] is String ? raw['pkg'] as String : '',
           category: raw['category'] is String ? raw['category'] as String : '',
         ),
+      'setVoiceEnroll' => SetVoiceEnrollUiCommand(raw['enabled'] == true),
+      'saveVoiceEnroll' => SaveVoiceEnrollUiCommand(
+          overlayJson: raw['overlay'] is String ? raw['overlay'] as String : '',
+        ),
       _ => null,
     };
   }
@@ -174,6 +178,26 @@ final class PhoneAlertUiCommand extends UiCommand {
       {'cmd': 'phoneAlert', 'pkg': packageName, 'category': category};
 }
 
+/// Transcribe incoming bot/simulator utterances without tools or Gemma.
+final class SetVoiceEnrollUiCommand extends UiCommand {
+  const SetVoiceEnrollUiCommand(this.enabled);
+  final bool enabled;
+
+  @override
+  Map<String, Object?> toMap() =>
+      {'cmd': 'setVoiceEnroll', 'enabled': enabled};
+}
+
+/// Persist a computed overlay and reload it into HybridBrain.
+final class SaveVoiceEnrollUiCommand extends UiCommand {
+  const SaveVoiceEnrollUiCommand({required this.overlayJson});
+  final String overlayJson;
+
+  @override
+  Map<String, Object?> toMap() =>
+      {'cmd': 'saveVoiceEnroll', 'overlay': overlayJson};
+}
+
 // ---------------------------------------------------------------------------
 // Service -> UI snapshot
 // ---------------------------------------------------------------------------
@@ -276,6 +300,10 @@ final class ServiceSnapshot {
     required this.lastEcho,
     required this.transcript,
     required this.activity,
+    this.voiceEnrollActive = false,
+    this.lastEnrollTranscript = '',
+    this.enrollSeq = 0,
+    this.voiceEnrollHasOverlay = false,
   });
 
   final DateTime sentAt;
@@ -324,6 +352,12 @@ final class ServiceSnapshot {
   /// Recent service activity lines, newest first.
   final List<String> activity;
 
+  /// Enrollment: ASR-only; last transcript and a seq so the UI can count takes.
+  final bool voiceEnrollActive;
+  final String lastEnrollTranscript;
+  final int enrollSeq;
+  final bool voiceEnrollHasOverlay;
+
   Map<String, Object?> toMap() => {
         'kind': 'snapshot',
         'sentAt': sentAt.millisecondsSinceEpoch,
@@ -355,6 +389,10 @@ final class ServiceSnapshot {
         'lastEcho': lastEcho?.toMap(),
         'transcript': [for (final e in transcript) e.toMap()],
         'activity': activity,
+        'voiceEnroll': voiceEnrollActive,
+        'enrollHeard': lastEnrollTranscript,
+        'enrollSeq': enrollSeq,
+        'enrollOverlay': voiceEnrollHasOverlay,
       };
 
   /// Returns null unless [raw] is a snapshot map.
@@ -406,6 +444,11 @@ final class ServiceSnapshot {
           for (final line in raw['activity'] as List)
             if (line is String) line,
       ],
+      voiceEnrollActive: raw['voiceEnroll'] == true,
+      lastEnrollTranscript:
+          raw['enrollHeard'] is String ? raw['enrollHeard'] as String : '',
+      enrollSeq: _asInt(raw['enrollSeq']) ?? 0,
+      voiceEnrollHasOverlay: raw['enrollOverlay'] == true,
     );
   }
 }

@@ -19,6 +19,8 @@ CompanionSetupFacts _facts({
   bool cdmSkipped = false,
   bool brainReady = false,
   bool fakeBrain = false,
+  bool voiceEnrollSkipped = false,
+  bool voiceEnrollHasOverlay = false,
 }) {
   return CompanionSetupFacts(
     welcomeSeen: welcomeSeen,
@@ -34,6 +36,8 @@ CompanionSetupFacts _facts({
     cdmSkipped: cdmSkipped,
     brainReady: brainReady,
     fakeBrain: fakeBrain,
+    voiceEnrollSkipped: voiceEnrollSkipped,
+    voiceEnrollHasOverlay: voiceEnrollHasOverlay,
   );
 }
 
@@ -44,6 +48,7 @@ CompanionSetupFacts _unlocked({
   bool oemKeepAliveSkipped = false,
   bool cdmSkipped = true,
   bool fakeBrain = true,
+  bool voiceEnrollSkipped = true,
 }) {
   return _facts(
     welcomeSeen: welcomeSeen,
@@ -57,6 +62,7 @@ CompanionSetupFacts _unlocked({
     cdmSkipped: cdmSkipped,
     fakeBrain: fakeBrain,
     brainReady: !fakeBrain,
+    voiceEnrollSkipped: voiceEnrollSkipped,
   );
 }
 
@@ -219,6 +225,7 @@ void main() {
             notificationAccessGranted: true,
             cdmSkipped: true,
             fakeBrain: true,
+            voiceEnrollSkipped: true,
           ),
         ),
         CompanionSetupStep.done,
@@ -316,6 +323,7 @@ void main() {
         cdmSkipped: false,
         brainReady: true,
         fakeBrain: false,
+        voiceEnrollSkipped: true,
       );
       expect(resolveCompanionSetupStep(facts), CompanionSetupStep.done);
     });
@@ -324,6 +332,85 @@ void main() {
       expect(
         resolveCompanionSetupStep(_facts(welcomeSeen: true)),
         CompanionSetupStep.notifications,
+      );
+    });
+
+    test('voice enroll is skip-later after brain, not a hard block', () {
+      final waiting = _facts(
+        welcomeSeen: true,
+        notificationsGranted: true,
+        bleAuthorized: true,
+        bluetoothOn: true,
+        batteryUnrestricted: true,
+        notificationAccessGranted: true,
+        cdmSkipped: true,
+        brainReady: true,
+      );
+      expect(resolveCompanionSetupStep(waiting), CompanionSetupStep.voiceEnroll);
+      expect(
+        firstBlockingCompanionSetupStep(waiting),
+        CompanionSetupStep.voiceEnroll,
+      );
+      expect(
+        resolveCompanionSetupStep(
+          _facts(
+            welcomeSeen: true,
+            notificationsGranted: true,
+            bleAuthorized: true,
+            bluetoothOn: true,
+            batteryUnrestricted: true,
+            notificationAccessGranted: true,
+            cdmSkipped: true,
+            brainReady: true,
+            voiceEnrollSkipped: true,
+          ),
+        ),
+        CompanionSetupStep.done,
+      );
+      expect(
+        resolveCompanionSetupStep(
+          _facts(
+            welcomeSeen: true,
+            notificationsGranted: true,
+            bleAuthorized: true,
+            bluetoothOn: true,
+            batteryUnrestricted: true,
+            notificationAccessGranted: true,
+            cdmSkipped: true,
+            brainReady: true,
+            voiceEnrollHasOverlay: true,
+          ),
+        ),
+        CompanionSetupStep.done,
+      );
+    });
+
+    test('unfinished enroll re-shows until skip or save', () {
+      final unfinished = _unlocked(voiceEnrollSkipped: false);
+      expect(
+        resolveCompanionSetupStep(unfinished),
+        CompanionSetupStep.voiceEnroll,
+      );
+    });
+
+    test('skipped enroll stays skipped; overlay present is also done', () {
+      expect(
+        resolveCompanionSetupStep(_unlocked(voiceEnrollSkipped: true)),
+        CompanionSetupStep.done,
+      );
+      expect(
+        resolveCompanionSetupStep(_facts(
+          welcomeSeen: true,
+          notificationsGranted: true,
+          bleAuthorized: true,
+          bluetoothOn: true,
+          batteryUnrestricted: true,
+          notificationAccessGranted: true,
+          cdmSkipped: true,
+          fakeBrain: true,
+          voiceEnrollHasOverlay: true,
+        )),
+        CompanionSetupStep.done,
       );
     });
   });
@@ -345,6 +432,7 @@ void main() {
       expect(trail, isNot(contains(CompanionSetupStep.oemKeepAlive)));
       expect(trail, isNot(contains(CompanionSetupStep.brain)));
       expect(trail, isNot(contains(CompanionSetupStep.notifications)));
+      expect(trail, contains(CompanionSetupStep.voiceEnroll));
     });
 
     test('includes OEM on vivo and brain when the real model is used', () {
@@ -353,6 +441,14 @@ void main() {
       );
       expect(trail, contains(CompanionSetupStep.oemKeepAlive));
       expect(trail, contains(CompanionSetupStep.brain));
+      expect(trail.indexOf(CompanionSetupStep.brain),
+          lessThan(trail.indexOf(CompanionSetupStep.voiceEnroll)));
+    });
+
+    test('FakeBrain omits brain wait but still shows voice enroll', () {
+      final trail = companionSetupTrail(_unlocked());
+      expect(trail, isNot(contains(CompanionSetupStep.brain)));
+      expect(trail, contains(CompanionSetupStep.voiceEnroll));
     });
   });
 }

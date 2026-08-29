@@ -15,6 +15,7 @@ enum CompanionSetupStep {
   oemKeepAlive,
   cdmLink,
   brain,
+  voiceEnroll,
   done,
 }
 
@@ -34,6 +35,8 @@ final class CompanionSetupFacts {
     required this.cdmSkipped,
     required this.brainReady,
     required this.fakeBrain,
+    this.voiceEnrollSkipped = false,
+    this.voiceEnrollHasOverlay = false,
   });
 
   /// Welcome was dismissed once on this install.
@@ -57,6 +60,10 @@ final class CompanionSetupFacts {
   /// `CUTEBOT_FAKE_BRAIN=true` — omit the download wait.
   final bool fakeBrain;
 
+  /// Skip-later: overlay saved, or user tapped skip. Unfinished re-shows.
+  final bool voiceEnrollSkipped;
+  final bool voiceEnrollHasOverlay;
+
   bool get bluetoothReady => bleAuthorized && bluetoothOn;
 
   bool get oemKeepAliveDone =>
@@ -65,6 +72,8 @@ final class CompanionSetupFacts {
   bool get cdmDone => cdmAssociated || cdmSkipped;
 
   bool get brainDone => fakeBrain || brainReady;
+
+  bool get voiceEnrollDone => voiceEnrollHasOverlay || voiceEnrollSkipped;
 }
 
 /// First unsatisfied step, or [CompanionSetupStep.done].
@@ -90,6 +99,7 @@ CompanionSetupStep firstBlockingCompanionSetupStep(CompanionSetupFacts facts) {
   if (!facts.oemKeepAliveDone) return CompanionSetupStep.oemKeepAlive;
   if (!facts.cdmDone) return CompanionSetupStep.cdmLink;
   if (!facts.brainDone) return CompanionSetupStep.brain;
+  if (!facts.voiceEnrollDone) return CompanionSetupStep.voiceEnroll;
   return CompanionSetupStep.done;
 }
 
@@ -109,5 +119,6 @@ List<CompanionSetupStep> companionSetupTrail(CompanionSetupFacts facts) {
     if (facts.isAggressiveOem) CompanionSetupStep.oemKeepAlive,
     CompanionSetupStep.cdmLink,
     if (!facts.fakeBrain) CompanionSetupStep.brain,
+    CompanionSetupStep.voiceEnroll,
   ];
 }
