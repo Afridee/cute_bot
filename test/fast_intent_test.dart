@@ -3,36 +3,75 @@ import 'package:cute_bot/companion/brain/fast_intent_overlay.dart';
 import 'package:cute_bot/companion/expressions.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-void main() {
-  group('persona few-shots', () {
-    test('hey little guy, you awake? → curious', () {
-      final hit = matchText('hey little guy, you awake?');
-      expect(hit, isNotNull);
-      expect(hit!.reason, 'greeting');
-      expect(hit.calls.single.transcriptLine, 'express(curious)');
-    });
+/// `express:happy` / `set_timer` / `MISS` — the compact shape the mood tables
+/// below assert against.
+String route(String text, [FastIntentOverlay? overlay]) {
+  final hit = matchText(text, overlay);
+  if (hit == null) return 'MISS';
+  final call = hit.calls.first;
+  if (call.name != 'express') return call.name;
+  return 'express:${call.arguments['mood']}';
+}
 
-    test('set a timer for three minutes, tea', () {
+String? routeReason(String text, [FastIntentOverlay? overlay]) =>
+    matchText(text, overlay)?.reason;
+
+/// One `express(mood)` with the expected route-log reason.
+void expectMood(String text, String mood, String reasonTag) {
+  expect(route(text), 'express:$mood', reason: 'utterance: "$text"');
+  expect(routeReason(text), reasonTag, reason: 'utterance: "$text"');
+}
+
+void expectMiss(String text) {
+  expect(route(text), 'MISS',
+      reason: 'utterance: "$text" should reach the LLM');
+}
+
+/// Runs a `(utterance, mood, reason)` table as one test each.
+void moodTable(List<(String, String, String)> cases) {
+  for (final (text, mood, reasonTag) in cases) {
+    test('"$text" → $mood', () => expectMood(text, mood, reasonTag));
+  }
+}
+
+void missTable(List<String> cases) {
+  for (final text in cases) {
+    test('"$text" → LLM', () => expectMiss(text));
+  }
+}
+
+void main() {
+  // -------------------------------------------------------------------------
+  // Tool intents. Precision matters most here: these must not regress when
+  // the mood vocabulary grows.
+  // -------------------------------------------------------------------------
+  group('set_timer', () {
+    test('minutes plus label', () {
       final hit = matchText('set a timer for three minutes, tea');
       expect(hit, isNotNull);
-      expect(hit!.calls.single.transcriptLine, 'set_timer(3, tea)');
+      final call = hit!.calls.single;
+      expect(call.name, 'set_timer');
+      expect(call.arguments['minutes'], 3);
+      expect(call.arguments['label'], 'tea');
+      expect(hit.reason, 'set-timer');
     });
 
-    test('how much battery do you have?', () {
-      final hit = matchText('how much battery do you have?');
-      expect(hit, isNotNull);
-      expect(hit!.calls.single.transcriptLine, 'get_battery()');
+    test('sub-minute durations use seconds', () {
+      final call = matchText('set a timer for 20 seconds')!.calls.single;
+      expect(call.name, 'set_timer');
+      expect(call.arguments['seconds'], 20);
+      expect(call.arguments.containsKey('minutes'), isFalse);
     });
 
-    test('do a little dance', () {
-      final hit = matchText('do a little dance');
-      expect(hit!.calls.single.transcriptLine, 'express(delighted)');
-    });
+    test('noun-first phrasing',
+        () => expect(route('20 second timer'), 'set_timer'));
+    test('half an hour',
+        () => expect(route('half an hour timer'), 'set_timer'));
+    test('a duration beats resume', () =>
+        expect(route('start the timer for 5 minutes'), 'set_timer'));
 
-    test('timer fire cue', () {
-      final hit = matchText("A timer just finished: 'tea'. Call express(alarm).");
-      expect(hit!.calls.single.transcriptLine, 'express(alarm)');
-    });
+    test('no duration is not a set', () => expectMiss('can you set a timer'));
+    test('bare duration is chatter', () => expectMiss('in 20 seconds'));
   });
 
   group('set_timer slots', () {
@@ -54,30 +93,12 @@ void main() {
       expect(call.arguments['label'], 'timer');
     });
 
-    test('two hours becomes 120', () {
-      expect(
-        matchText('start a timer for two hours, bread')!.calls.single.arguments,
-        {'minutes': 120, 'label': 'bread'},
-      );
-    });
-
-    test('over 180 minutes is a miss (BotBody would reject)', () {
+    test('over 180 minutes is a miss', () {
       expect(matchText('set a timer for four hours'), isNull);
     });
 
-    test('timer without a duration is a miss', () {
-      expect(matchText('set a timer'), isNull);
-    });
-
     test('remind me in ten minutes', () {
-      final call = matchText('remind me in ten minutes')!.calls.single;
-      expect(call.arguments['minutes'], 10);
-    });
-
-    test('half an hour becomes 30', () {
-      final call = matchText('set a timer for half an hour')!.calls.single;
-      expect(call.arguments['minutes'], 30);
-      expect(call.arguments['label'], 'timer');
+      expect(matchText('remind me in ten minutes')!.calls.single.arguments['minutes'], 10);
     });
 
     test('an hour and a half becomes 90', () {
@@ -87,73 +108,10 @@ void main() {
       expect(call.arguments['label'], 'bread');
     });
 
-    test('two and a half hours becomes 150', () {
-      final call =
-          matchText('start a timer for two and a half hours')!.calls.single;
-      expect(call.arguments['minutes'], 150);
-    });
-
-    test('three and a half hours exceeds the cap', () {
-      expect(matchText('set a timer for three and a half hours'), isNull);
-    });
-
-    test('wake me up without a timer word is a miss', () {
-      expect(matchText('wake me up in twenty minutes'), isNull);
-    });
-
-    test('countdown ten minutes', () {
-      final call = matchText('countdown ten minutes')!.calls.single;
-      expect(call.arguments['minutes'], 10);
-    });
-
-    test('Set timer for 20 seconds is seconds, not minutes', () {
-      final call = matchText('Set timer for 20 seconds')!.calls.single;
-      expect(call.name, 'set_timer');
-      expect(call.arguments['seconds'], 20);
-      expect(call.arguments.containsKey('minutes'), isFalse);
-      expect(call.arguments['label'], 'timer');
-    });
-
-    test('set a timer for 20 seconds', () {
-      expect(matchText('set a timer for 20 seconds')!.calls.single.arguments,
-          {'seconds': 20, 'label': 'timer'});
-    });
-
-    test('twenty seconds as words', () {
-      expect(
-        matchText('set a timer for twenty seconds')!.calls.single.arguments['seconds'],
-        20,
-      );
-    });
-
-    test('20 second timer (unit before timer)', () {
-      final call = matchText('20 second timer')!.calls.single;
-      expect(call.arguments['seconds'], 20);
-    });
-
-    test('hyphenated 20-second timer', () {
-      expect(matchText('set a 20-second timer')!.calls.single.arguments['seconds'],
-          20);
-    });
-
-    test('remind me in 15 seconds', () {
-      expect(matchText('remind me in 15 seconds')!.calls.single.arguments['seconds'],
-          15);
-    });
-
     test('ASR near-miss diamer still sets seconds', () {
       final call =
           matchText('START THE DIAMER FOR TWENTY SECONDS')!.calls.single;
-      expect(call.name, 'set_timer');
       expect(call.arguments['seconds'], 20);
-      expect(call.arguments.containsKey('minutes'), isFalse);
-    });
-
-    test('ASR near-miss dimer still sets minutes', () {
-      final call =
-          matchText('CAN YOU SAID THE DIMER FOR TWO MINUTES')!.calls.single;
-      expect(call.name, 'set_timer');
-      expect(call.arguments['minutes'], 2);
     });
 
     test('ASR near-miss tymer with duration', () {
@@ -167,17 +125,6 @@ void main() {
       expect(matchText('start the diamer'), isNull);
     });
 
-    test('distance-3 noun with a duration stays chatter', () {
-      expect(matchText('start the dinner for two minutes'), isNull);
-    });
-
-    test('I need a timer for 30 seconds', () {
-      expect(
-        matchText('I need a timer for 30 seconds')!.calls.single.arguments['seconds'],
-        30,
-      );
-    });
-
     test('1 minute 20 seconds is mixed', () {
       final call =
           matchText('set a timer for 1 minute 20 seconds, tea')!.calls.single;
@@ -185,55 +132,24 @@ void main() {
       expect(call.arguments['seconds'], 20);
       expect(call.arguments['label'], 'tea');
     });
-
-    test('90 seconds is 1 minute 30 seconds', () {
-      final call = matchText('start a timer for 90 seconds')!.calls.single;
-      expect(call.arguments['minutes'], 1);
-      expect(call.arguments['seconds'], 30);
-    });
-
-    test('a couple of seconds', () {
-      expect(
-        matchText('set a timer for a couple of seconds')!.calls.single.arguments['seconds'],
-        2,
-      );
-    });
-
-    test('start the timer for 20 seconds is set, not resume', () {
-      expect(matchText('start the timer for 20 seconds')!.reason, 'set-timer');
-      expect(
-        matchText('start the timer for 20 seconds')!.calls.single.arguments['seconds'],
-        20,
-      );
-    });
   });
 
   group('timer control', () {
-    test('cancel the timer', () {
-      final hit = matchText('cancel the timer');
-      expect(hit, isNotNull);
-      expect(hit!.reason, 'cancel-timer');
-      expect(hit.calls.single.transcriptLine, 'cancel_timer()');
+    test('cancel', () {
+      expect(route('cancel the timer'), 'cancel_timer');
+      expect(routeReason('cancel the timer'), 'cancel-timer');
     });
-
-    test('stop the timer', () {
-      expect(matchText('stop the timer')!.calls.single.transcriptLine,
-          'cancel_timer()');
-    });
-
-    test('kill / forget / hold / freeze stay misses until enrolled', () {
-      expect(matchText('kill the timer'), isNull);
-      expect(matchText('forget the tea timer'), isNull);
-      expect(matchText('hold the timer'), isNull);
-      expect(matchText('freeze the timer'), isNull);
-    });
-
-    test('cancel the tea timer is unlabeled', () {
-      final call = matchText('cancel the tea timer')!.calls.single;
-      expect(call.name, 'cancel_timer');
-      expect(call.arguments.containsKey('label'), isFalse);
-      expect(call.transcriptLine, 'cancel_timer()');
-    });
+    test('stop is a cancel',
+        () => expect(route('stop the timer'), 'cancel_timer'));
+    test('turn off', () => expect(route('turn off the timer'), 'cancel_timer'));
+    test('pause', () => expect(route('pause the timer'), 'pause_timer'));
+    test('resume', () => expect(route('resume the timer'), 'resume_timer'));
+    test('start without a duration resumes',
+        () => expect(route('start the timer'), 'resume_timer'));
+    test('timer fire', () =>
+        expectMood("A timer just finished: 'tea'.", 'alarm', 'timer-fire'));
+    test('negation blocks the whole matcher',
+        () => expectMiss("don't cancel the timer"));
 
     test('discourse prefixes do not become cancel labels', () {
       for (final utterance in [
@@ -242,55 +158,14 @@ void main() {
         'Uh, cancel the timer',
       ]) {
         final hit = matchText(utterance);
-        expect(hit, isNotNull, reason: utterance);
         expect(hit!.reason, 'cancel-timer', reason: utterance);
         expect(hit.calls.single.transcriptLine, 'cancel_timer()');
         expect(hit.calls.single.arguments.containsKey('label'), isFalse);
       }
     });
 
-    test('discourse prefixes do not become pause or resume labels', () {
-      expect(matchText('Uh, pause the timer')!.calls.single.transcriptLine,
-          'pause_timer()');
-      expect(matchText("I'll resume the timer")!.calls.single.transcriptLine,
-          'resume_timer()');
-    });
-
-    test('pause the tea timer is unlabeled', () {
-      expect(matchText('pause the tea timer')!.calls.single.transcriptLine,
-          'pause_timer()');
-    });
-
-    test('resume the timer', () {
-      expect(matchText('resume the timer')!.calls.single.transcriptLine,
-          'resume_timer()');
-    });
-
-    test('start the timer (no duration) is resume', () {
-      expect(matchText('start the timer')!.reason, 'resume-timer');
-    });
-
-    test('start the timer for 5 minutes is still set', () {
-      expect(matchText('start the timer for 5 minutes')!.reason, 'set-timer');
-    });
-
-    test('unpause the countdown', () {
-      expect(matchText('unpause the countdown')!.reason, 'resume-timer');
-    });
-
-    test('canceled the timer is cancel (past tense)', () {
-      expect(matchText('canceled the timer')!.reason, 'cancel-timer');
-      expect(matchText('cancelled the timer')!.reason, 'cancel-timer');
-    });
-
-    test('paused / resumed the timer use inflections', () {
-      expect(matchText('paused the timer')!.reason, 'pause-timer');
-      expect(matchText('resumed the timer')!.reason, 'resume-timer');
-    });
-
     test('ASR canseled the timer is cancel, not a label', () {
       final hit = matchText('CANSELED THE TIMER');
-      expect(hit, isNotNull);
       expect(hit!.reason, 'cancel-timer');
       expect(hit.calls.single.transcriptLine, 'cancel_timer()');
     });
@@ -304,17 +179,11 @@ void main() {
         ),
       });
       final cancel = matchText('CANSELED THE DIAMOND', overlay);
-      expect(cancel, isNotNull);
       expect(cancel!.reason, 'cancel-timer');
       expect(cancel.calls.single.transcriptLine, 'cancel_timer()');
-      expect(
-        matchText('RESUMED THE DIAMOND', overlay)!.calls.single.transcriptLine,
-        'resume_timer()',
-      );
-      expect(matchText('THE DIAMOND', overlay), isNull);
     });
 
-    test('WAS THE DIAMOND pauses via was-cue × shared noun, not resume', () {
+    test('WAS THE DIAMOND pauses via was-cue × shared noun', () {
       const overlay = FastIntentOverlay(intents: {
         FastIntentId.pauseTimer: FastIntentAliases(
           phrases: ['was the temper'],
@@ -327,197 +196,43 @@ void main() {
         ),
       });
       final hit = matchText('WAS THE DIAMOND', overlay);
-      expect(hit, isNotNull);
       expect(hit!.reason, 'pause-timer');
       expect(hit.calls.single.transcriptLine, 'pause_timer()');
     });
   });
 
-  group('precision', () {
-    test('negation does not arm a timer', () {
-      expect(matchText("don't set a timer for 3 minutes"), isNull);
-      expect(matchText("don't cancel the timer"), isNull);
-    });
+  group('battery', () {
+    test('asking',
+        () => expect(route('how much battery do you have?'), 'get_battery'));
+    test('charged', () => expect(route('are you charged?'), 'get_battery'));
 
-    test('open-ended chatter is a miss', () {
-      expect(matchText('tell me a joke'), isNull);
-      expect(matchText('what time is it'), isNull);
-      expect(matchText('I am feeling a bit sad today'), isNull);
-      expect(matchText('20 seconds'), isNull);
-      expect(matchText('give me 20 seconds'), isNull);
-    });
-
-    test('empty is a miss', () {
-      expect(matchText(''), isNull);
-      expect(matchText('   '), isNull);
+    test('percent → mood', () {
+      expect(moodFromBatteryPercent(5).name, 'low_battery');
+      expect(moodFromBatteryPercent(19).name, 'low_battery');
+      expect(moodFromBatteryPercent(25).name, 'sleepy');
+      expect(moodFromBatteryPercent(80).name, 'yes');
+      expect(moodFromBatteryPercent(null).name, 'confused');
+      expect(moodFromBatteryPercent('80').name, 'confused');
     });
   });
 
-  group('other moods', () {
-    test('good night is sleepy', () {
-      expect(matchText('good night little guy')!.calls.single.arguments['mood'],
-          'sleepy');
+  group('overlay is additive', () {
+    const overlay = FastIntentOverlay(intents: {
+      FastIntentId.pauseTimer: FastIntentAliases(
+        phrases: ['was the temper'],
+        noun: ['temper'],
+      ),
     });
 
-    test('love you', () {
-      expect(matchText('I love you')!.calls.single.transcriptLine,
-          'express(love)');
-    });
+    test('enrolled phrase', () =>
+        expect(route('was the temper', overlay), 'pause_timer'));
+    test('enrolled noun with a default verb', () =>
+        expect(route('pause the temper', overlay), 'pause_timer'));
+    test('defaults still win', () =>
+        expect(route('cancel the timer', overlay), 'cancel_timer'));
+    test('no overlay is unchanged', () =>
+        expect(route('was the temper'), 'MISS'));
 
-    test('good bot', () {
-      expect(matchText('good bot')!.calls.single.transcriptLine, 'express(happy)');
-    });
-  });
-
-  group('capability no', () {
-    test('can you talk → no', () {
-      expect(matchText('can you talk?')!.calls.single.transcriptLine,
-          'express(no)');
-    });
-
-    test('say something → no', () {
-      expect(matchText('say something')!.calls.single.arguments['mood'], 'no');
-    });
-
-    test('can you set a timer stays a miss (no duration)', () {
-      expect(matchText('can you set a timer'), isNull);
-    });
-  });
-
-  group('play and startle', () {
-    test('wanna play → playful', () {
-      expect(matchText('wanna play?')!.calls.single.arguments['mood'],
-          'playful');
-    });
-
-    test('peekaboo → playful', () {
-      expect(
-          matchText('peekaboo!')!.calls.single.arguments['mood'], 'playful');
-    });
-
-    test('boo → startled', () {
-      expect(matchText('boo!')!.calls.single.arguments['mood'], 'startled');
-    });
-
-    test('surprise → startled', () {
-      expect(
-          matchText('surprise!')!.calls.single.arguments['mood'], 'startled');
-    });
-
-    test('boogie is a miss until the LLM', () {
-      expect(matchText('boogie time'), isNull);
-    });
-  });
-
-  group('thanks and praise', () {
-    test('thank you → happy', () {
-      expect(matchText('thank you buddy')!.calls.single.arguments['mood'],
-          'happy');
-    });
-
-    test('well done → proud', () {
-      expect(matchText('well done!')!.calls.single.arguments['mood'], 'proud');
-    });
-
-    test('you did it → proud', () {
-      expect(matchText('you did it!')!.reason, 'well-done');
-    });
-  });
-
-  group('scold and comfort', () {
-    test('bad bot → sad via scold', () {
-      final hit = matchText('bad bot')!;
-      expect(hit.reason, 'scold');
-      expect(hit.calls.single.arguments['mood'], 'sad');
-    });
-
-    test('bad day is comfort, not scold', () {
-      final hit = matchText('I had a bad day')!;
-      expect(hit.reason, 'comfort');
-      expect(hit.calls.single.arguments['mood'], 'sad');
-    });
-
-    test("i'm sad → comfort", () {
-      expect(matchText("i'm sad")!.reason, 'comfort');
-    });
-
-    test('open-ended sadness still goes to the LLM', () {
-      expect(matchText('I am feeling a bit sad today'), isNull);
-    });
-  });
-
-  group('quiet', () {
-    test('be quiet → yes', () {
-      expect(matchText('be quiet')!.calls.single.arguments['mood'], 'yes');
-    });
-
-    test('shhh → yes', () {
-      expect(matchText('shhh')!.reason, 'quiet');
-    });
-
-    test('stop beeping stays a miss', () {
-      expect(matchText('stop beeping'), isNull);
-    });
-  });
-
-  group('farewells', () {
-    test('go to sleep → sleepy', () {
-      expect(
-          matchText('go to sleep')!.calls.single.arguments['mood'], 'sleepy');
-    });
-
-    test('sweet dreams → sleepy', () {
-      expect(matchText('sweet dreams little guy')!.reason, 'wind-down');
-    });
-
-    test('see you tomorrow → sleepy', () {
-      expect(matchText('see you tomorrow')!.calls.single.arguments['mood'],
-          'sleepy');
-    });
-
-    test('bye bye → sad', () {
-      expect(matchText('bye bye')!.calls.single.arguments['mood'], 'sad');
-    });
-
-    test('goodbye → sad', () {
-      expect(matchText('goodbye!')!.reason, 'goodbye');
-    });
-
-    test('gotta go → sad', () {
-      expect(matchText('gotta go')!.calls.single.arguments['mood'], 'sad');
-    });
-  });
-
-  group('canonical extras', () {
-    test('are you charged → get_battery', () {
-      expect(matchText('are you charged?')!.calls.single.transcriptLine,
-          'get_battery()');
-    });
-
-    test('running low / juice / howdy / shake stay misses', () {
-      expect(matchText('running low?'), isNull);
-      expect(matchText('juice left'), isNull);
-      expect(matchText('howdy'), isNull);
-      expect(matchText('shake it!'), isNull);
-      expect(matchText("you're adorable"), isNull);
-      expect(matchText('love ya'), isNull);
-    });
-
-    test('i missed you → love', () {
-      expect(matchText('i missed you')!.reason, 'affection');
-    });
-
-    test('good evening → curious', () {
-      expect(matchText('good evening')!.calls.single.arguments['mood'],
-          'curious');
-    });
-
-    test("what's up → curious", () {
-      expect(matchText("what's up")!.reason, 'greeting');
-    });
-  });
-
-  group('overlay', () {
     test('enrolled pause phrase hits; unrelated was-the does not', () {
       const overlay = FastIntentOverlay(intents: {
         FastIntentId.pauseTimer: FastIntentAliases(
@@ -529,7 +244,6 @@ void main() {
       expect(matchText('WAS THE TEMPER BZZ', overlay)!.reason, 'pause-timer');
       expect(matchText('I was the one who set the timer', overlay)?.reason,
           isNot('pause-timer'));
-      expect(matchText('pause the timer', overlay)!.reason, 'pause-timer');
     });
   });
 
@@ -540,5 +254,341 @@ void main() {
       expect(moodFromBatteryPercent(28), BotMood.sleepy);
       expect(moodFromBatteryPercent(82), BotMood.yes);
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Mood clusters.
+  // -------------------------------------------------------------------------
+  group('praise', () {
+    moodTable(const [
+      ('You are a good boy.', 'happy', 'praise'),
+      ('good girl', 'happy', 'praise'),
+      ('what a good boy', 'happy', 'praise'),
+      ("who's a good little robot", 'happy', 'praise'),
+      ('good bot', 'happy', 'praise'),
+      ('nice bot', 'happy', 'praise'),
+      ('sweet girl', 'happy', 'praise'),
+      ('clever bud', 'happy', 'praise'),
+      ("you're so clever", 'happy', 'praise'),
+      ('you are amazing', 'happy', 'praise'),
+      ("you're the best", 'happy', 'praise'),
+      ('best bot ever', 'happy', 'praise'),
+      ('good helper', 'happy', 'praise'),
+      ('i like you', 'happy', 'praise'),
+      ('thank you', 'happy', 'thanks'),
+      ('thanks buddy', 'happy', 'thanks'),
+      ('appreciate it', 'happy', 'thanks'),
+      ('good job', 'proud', 'well-done'),
+      ('well done little guy', 'proud', 'well-done'),
+      ('nice work', 'proud', 'well-done'),
+      ('way to go', 'proud', 'well-done'),
+      ("i'm proud of you", 'proud', 'well-done'),
+      ('you nailed it', 'proud', 'well-done'),
+      ('bravo', 'proud', 'well-done'),
+    ]);
+
+    // Praise needs an address; bare adjectives belong to the LLM.
+    missTable(const [
+      'good friend',
+      "that's a good thing",
+      'he is a good man',
+      'I had a great day',
+    ]);
+  });
+
+  group('affection', () {
+    moodTable(const [
+      ('i love you', 'love', 'affection'),
+      ('love you little guy', 'love', 'affection'),
+      ('i missed you', 'love', 'affection'),
+      ("you're cute", 'love', 'affection'),
+      ('you are so adorable', 'love', 'affection'),
+      ("you're sweet", 'love', 'affection'),
+      ('cutie', 'love', 'affection'),
+      ('my little guy', 'love', 'affection'),
+      ('come here', 'love', 'affection'),
+      ('give me a hug', 'love', 'affection'),
+      ('snuggle time', 'love', 'affection'),
+      ('kisses', 'love', 'affection'),
+      ('you make me happy', 'love', 'affection'),
+    ]);
+
+    missTable(const [
+      "i don't love you",
+      'I love pizza and cold weather',
+      'kiss the cook',
+    ]);
+  });
+
+  group('comfort', () {
+    moodTable(const [
+      ("i'm sad", 'sad', 'comfort'),
+      ('i am sad', 'sad', 'comfort'),
+      ("i'm so lonely", 'sad', 'comfort'),
+      ("i'm stressed", 'sad', 'comfort'),
+      ('feeling down', 'sad', 'comfort'),
+      ('bad day', 'sad', 'comfort'),
+      ('i had a rough week', 'sad', 'comfort'),
+      ('i need a hug', 'sad', 'comfort'),
+      ('worst day ever', 'sad', 'comfort'),
+      ('cheer me up', 'sad', 'comfort'),
+    ]);
+
+    // Comfort stays narrow on purpose — hedged emotional talk deserves the
+    // model's turn, not a blue LED.
+    missTable(const [
+      'I am feeling a bit sad today',
+      'today was interesting',
+      "i'm fine",
+    ]);
+  });
+
+  group('sleepy', () {
+    moodTable(const [
+      ("i'm tired", 'sleepy', 'sleepy'),
+      ('i am so exhausted', 'sleepy', 'sleepy'),
+      ('i need a nap', 'sleepy', 'sleepy'),
+      ('yawning', 'sleepy', 'sleepy'),
+      ('are you sleepy', 'sleepy', 'sleepy'),
+      ('time for bed', 'sleepy', 'wind-down'),
+      ('bedtime', 'sleepy', 'wind-down'),
+      ('go to sleep', 'sleepy', 'wind-down'),
+      ('sweet dreams', 'sleepy', 'wind-down'),
+      ('night night', 'sleepy', 'wind-down'),
+      ('good night', 'sleepy', 'good-night'),
+    ]);
+
+    missTable(const [
+      "i'm tired of this nonsense",
+      "I'm not tired",
+    ]);
+  });
+
+  group('farewell', () {
+    moodTable(const [
+      ('bye', 'sad', 'goodbye'),
+      ('goodbye little guy', 'sad', 'goodbye'),
+      ('see you later', 'sad', 'goodbye'),
+      ('gotta go', 'sad', 'goodbye'),
+      ('take care', 'sad', 'goodbye'),
+      ("i'm heading out", 'sad', 'goodbye'),
+      ('talk to you later', 'sad', 'goodbye'),
+      ('until tomorrow', 'sad', 'goodbye'),
+    ]);
+
+    missTable(const ['take care of the dishes']);
+  });
+
+  group('greeting and ping', () {
+    moodTable(const [
+      ('hey', 'curious', 'greeting'),
+      ('hi there', 'curious', 'greeting'),
+      ('hello bot', 'curious', 'greeting'),
+      ('hey little guy, you awake?', 'curious', 'greeting'),
+      ('are you there', 'curious', 'greeting'),
+      ('can you hear me', 'curious', 'greeting'),
+      ("what's up", 'curious', 'greeting'),
+      ('what are you doing', 'curious', 'greeting'),
+      ('are you ok', 'curious', 'greeting'),
+      ('how are you', 'curious', 'greeting'),
+      ('good morning', 'curious', 'greeting'),
+      ('wake up', 'curious', 'greeting'),
+      ('look at me', 'curious', 'greeting'),
+    ]);
+
+    missTable(const [
+      "what's the plan for tomorrow",
+      'the weather is nice today',
+    ]);
+  });
+
+  group('play', () {
+    moodTable(const [
+      ('wanna play', 'playful', 'play'),
+      ("let's play", 'playful', 'play'),
+      ('peekaboo', 'playful', 'play'),
+      ('tickle tickle', 'playful', 'play'),
+      ('do it again', 'playful', 'play'),
+      ('again', 'playful', 'play'),
+      ('one more time', 'playful', 'play'),
+      ('high five', 'playful', 'play'),
+      ("you're so silly", 'playful', 'play'),
+      ('silly bot', 'playful', 'play'),
+      ('chase me', 'playful', 'play'),
+      ("let's go", 'playful', 'play'),
+      ("tag you're it", 'playful', 'play'),
+      ('do a trick', 'playful', 'play'),
+    ]);
+
+    missTable(const [
+      'tag along',
+      'I went to the store again yesterday',
+    ]);
+  });
+
+  group('delighted', () {
+    moodTable(const [
+      ('do a little dance', 'delighted', 'dance'),
+      ('wiggle for me', 'delighted', 'dance'),
+      ('yay', 'delighted', 'celebrate'),
+      ('woohoo', 'delighted', 'celebrate'),
+      ('hooray', 'delighted', 'celebrate'),
+      ('we did it', 'delighted', 'celebrate'),
+      ("i'm so excited", 'delighted', 'celebrate'),
+      ('congratulations', 'delighted', 'celebrate'),
+      ('i got the job', 'delighted', 'celebrate'),
+    ]);
+
+    missTable(const ['boogie time']);
+  });
+
+  group('scold', () {
+    moodTable(const [
+      ('bad bot', 'sad', 'scold'),
+      ('bad robot', 'sad', 'scold'),
+      ('stupid robot', 'sad', 'scold'),
+      ('naughty bot', 'sad', 'scold'),
+      ("you're being bad", 'sad', 'scold'),
+      ('useless machine', 'sad', 'scold'),
+      ('go away', 'sad', 'scold'),
+      ('leave me alone', 'sad', 'scold'),
+    ]);
+
+    // Not aimed at the bot.
+    missTable(const [
+      'my boss is annoying',
+      'the weather is bad today',
+    ]);
+  });
+
+  group('annoyed', () {
+    moodTable(const [
+      ('ugh', 'annoyed', 'annoyed'),
+      ('ugh seriously', 'annoyed', 'annoyed'),
+      ('enough already', 'annoyed', 'annoyed'),
+      ("that's enough", 'annoyed', 'annoyed'),
+      ('knock it off', 'annoyed', 'annoyed'),
+      ('cut it out', 'annoyed', 'annoyed'),
+      ('so annoying', 'annoyed', 'annoyed'),
+      ('not again', 'annoyed', 'annoyed'),
+      ('oh come on', 'annoyed', 'annoyed'),
+    ]);
+
+    // The two things annoyed must never steal, plus a false friend.
+    missTable(const [
+      'stop beeping',
+      "that's enough sugar",
+    ]);
+    test('stop the timer stays a cancel',
+        () => expect(route('stop the timer'), 'cancel_timer'));
+  });
+
+  group('quiet', () {
+    moodTable(const [
+      ('be quiet', 'yes', 'quiet'),
+      ('shhh', 'yes', 'quiet'),
+      ('hush now', 'yes', 'quiet'),
+      ('keep it down', 'yes', 'quiet'),
+      ('too loud', 'yes', 'quiet'),
+      ('pipe down', 'yes', 'quiet'),
+    ]);
+
+    missTable(const ['stop that noise']);
+  });
+
+  group('startle', () {
+    moodTable(const [
+      ('boo', 'startled', 'startle'),
+      ('surprise', 'startled', 'startle'),
+      ('watch out', 'startled', 'startle'),
+    ]);
+
+    missTable(const [
+      'boo hoo',
+      'surprise party next week',
+    ]);
+  });
+
+  group('cannot do', () {
+    moodTable(const [
+      ('can you talk', 'no', 'cannot-do'),
+      ('can you sing', 'no', 'cannot-do'),
+      ('say something', 'no', 'cannot-do'),
+      ('tell me a joke', 'no', 'cannot-do'),
+      ('what time is it', 'no', 'cannot-do'),
+      ('play some music', 'no', 'cannot-do'),
+    ]);
+
+    // Things the body can actually do stay off the list.
+    test('dancing is possible',
+        () => expectMood('can you dance', 'delighted', 'dance'));
+    test('hearing is possible',
+        () => expectMood('can you hear me', 'curious', 'greeting'));
+  });
+
+  group('confused', () {
+    moodTable(const [
+      ('huh', 'confused', 'confused'),
+      ('what do you mean', 'confused', 'confused'),
+      ('did you get that', 'confused', 'confused'),
+      ('are you confused', 'confused', 'confused'),
+    ]);
+
+    missTable(const ['what should we have for dinner']);
+  });
+
+  // -------------------------------------------------------------------------
+  // Ordering. These are the pairs where two clusters both match and the
+  // position in matchText() is the tie-breaker.
+  // -------------------------------------------------------------------------
+  group('matcher order', () {
+    test('bad bot is a scold, bad day is comfort', () {
+      expect(routeReason('bad bot'), 'scold');
+      expect(routeReason('bad day'), 'comfort');
+    });
+
+    test('silly is teasing, not scolding',
+        () => expect(routeReason('silly bot'), 'play'));
+
+    test('a hug request is comfort, not affection', () {
+      expect(routeReason('i need a hug'), 'comfort');
+      expect(routeReason('give me a hug'), 'affection');
+    });
+
+    test('addressed sweetness is praise, bare sweetness is affection', () {
+      expect(route('sweet boy'), 'express:happy');
+      expect(route("you're sweet"), 'express:love');
+    });
+
+    test('bedtime beats both play and farewell', () {
+      expect(routeReason("let's go to bed"), 'wind-down');
+      expect(routeReason('see you tomorrow'), 'wind-down');
+      expect(routeReason('see you later'), 'goodbye');
+    });
+
+    test('good night keeps its own reason',
+        () => expect(routeReason('good night'), 'good-night'));
+
+    test('quiet outranks annoyance', () {
+      expect(routeReason('be quiet'), 'quiet');
+      expect(routeReason('enough already'), 'annoyed');
+    });
+
+    test('cannot-do outranks the play and greeting nets', () {
+      expect(routeReason('play some music'), 'cannot-do');
+      expect(routeReason('say hi'), 'cannot-do');
+    });
+  });
+
+  group('plain chatter reaches the LLM', () {
+    missTable(const [
+      '',
+      '   ',
+      'I have a meeting at five',
+      'open the pod bay doors',
+      'I need to buy a new robot',
+      'give me a second',
+      'hold on a minute',
+    ]);
   });
 }

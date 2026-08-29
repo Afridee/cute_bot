@@ -5,6 +5,9 @@
 /// and the persona few-shots are formulaic. High-confidence hits skip
 /// Gemma's audio encode + thought block; anything hedged falls through.
 /// Precision over recall — a wrong timer is worse than a slow one.
+///
+/// Tool intents are hand-written matchers (duration parsing, overlay slots,
+/// ASR fuzz). Mood intents are data: see [_MoodBucket] below.
 library;
 
 import '../expressions.dart';
@@ -21,9 +24,27 @@ final class FastIntentHit {
 
 /// Parse [text] (a cue, or a future ASR transcript). Null = let the LLM go.
 ///
-/// Checks run narrow-to-broad: tool intents first, then specific moods,
-/// with the catch-all greeting (`hey`/`hi`) last. Optional [overlay] is
-/// additive: defaults run first; enrolled phrases/slots only if they miss.
+/// Checks run narrow-to-broad and the first hit wins, so the order below is
+/// the specification:
+///
+/// 1. Tool intents first. A misrouted timer is the expensive mistake, and
+///    `stop the timer` must reach `cancel_timer` before the annoyed bucket
+///    can read it as frustration.
+/// 2. `cannot-do` next: it owns `say something` / `play music`, which would
+///    otherwise be eaten by the greeting and play buckets.
+/// 3. `quiet` before the frustration buckets — `be quiet` is a request the
+///    bot can honour (`yes`), not a mood to mirror.
+/// 4. Bot-directed judgement (`scold`, `praise`) before anything generic, so
+///    `bad bot` is a scold while `bad day` falls through to comfort.
+/// 5. First-person distress (`comfort`, then `sleepy`) before `affection`,
+///    which is what makes `i need a hug` sad rather than lovestruck.
+/// 6. `annoyed` sits below all of the above: an interjection should never
+///    outrank an explicit request or a stated feeling.
+/// 7. Farewell before greeting, and the `hey`/`hi` greeting dead last —
+///    it is the widest net in the file.
+///
+/// Optional [overlay] is additive and tool-only: defaults run first, enrolled
+/// phrases/slots only if they miss. Mood matchers are default-only.
 FastIntentHit? matchText(String text, [FastIntentOverlay? overlay]) {
   final trimmed = text.trim();
   if (trimmed.isEmpty) return null;
@@ -37,14 +58,17 @@ FastIntentHit? matchText(String text, [FastIntentOverlay? overlay]) {
       _matchSetTimer(trimmed, lower, overlay) ??
       _matchBattery(lower, overlay) ??
       _matchCapabilityNo(lower) ??
+      _matchQuiet(lower) ??
+      _matchScold(lower) ??
+      _matchPraise(lower) ??
       _matchDance(lower) ??
       _matchPlay(lower) ??
       _matchStartle(lower) ??
-      _matchThanksPraise(lower) ??
-      _matchScold(lower) ??
       _matchComfort(lower) ??
-      _matchQuiet(lower) ??
+      _matchSleepy(lower) ??
+      _matchAnnoyed(lower) ??
       _matchAffection(lower) ??
+      _matchConfusion(lower) ??
       _matchFarewell(lower) ??
       _matchGreeting(lower);
 }
@@ -425,181 +449,402 @@ bool _slotPairHits(String lower, List<String> verbs, List<String> nouns) {
   return RegExp('\\b($v)\\b.{0,40}\\b($n)\\b').hasMatch(lower);
 }
 
+// ---------------------------------------------------------------------------
+// Mood intents.
+//
+// Every rule below resolves to exactly one `express(mood)`, so the rules are
+// data: an alternation, the mood it means, and the reason string the route
+// log prints. [_matchBuckets] walks a list in order and takes the first hit,
+// so inside a cluster the specific rows sit above the catch-all ones — the
+// same discipline [matchText] applies across clusters.
+//
+// Precision here is softer than for timers (a slightly wrong mood is a
+// personality quirk, a wrong timer is a bug), but the rules still lean on
+// bot-directed phrasing: an address ("good boy", "you're clever") or a
+// stated first-person feeling ("i'm exhausted"), not bare adjectives.
+// ---------------------------------------------------------------------------
+
+final class _MoodBucket {
+  _MoodBucket(String pattern, this.mood, this.reason) : _re = RegExp(pattern);
+
+  final RegExp _re;
+  final BotMood mood;
+  final String reason;
+
+  bool hits(String lower) => _re.hasMatch(lower);
+}
+
+FastIntentHit? _matchBuckets(String lower, List<_MoodBucket> buckets) {
+  for (final bucket in buckets) {
+    if (!bucket.hits(lower)) continue;
+    return FastIntentHit(
+      [
+        ToolCall('express', {'mood': bucket.mood.name}),
+      ],
+      reason: bucket.reason,
+    );
+  }
+  return null;
+}
+
+/// What people call the bot out loud. `friend` is deliberately absent:
+/// "good friend" is almost always about a person, not the robot.
+const _petNoun = r'(?:bots?|robots?|droid|boy|girl|buddy|bud|pal|guy|gal|kid'
+    r'|fella|fellow|dude|baby|pet|little one)';
+
+/// Impersonal nouns people reach for when cross. Kept off [_petNoun] so
+/// praise never fires on "that's a good thing".
+const _scoldNoun =
+    r'(?:bots?|robots?|droid|boy|girl|guy|kid|thing|machine|toy)';
+
+/// Optional endearment slot: "good *little* buddy".
+const _petQualifier = r'(?:little |lil |tiny |wee |dumb |silly )?';
+
+/// `<adjective> [little] <noun>` — the shape of address-style judgement.
+/// Requiring the noun is what keeps "bad day" out of the scold bucket and
+/// "good friend" out of praise.
+String _addressed(String adjectives, String noun) =>
+    '\\b(?:$adjectives)\\s+$_petQualifier$noun\\b';
+
 /// The persona says the bot must `express(no)` when asked to do something
 /// it cannot do. Only the literal impossibles — anything vaguer goes to
 /// the LLM (the timer check already ran, so "can you set a timer for 5
 /// minutes" never reaches this).
-FastIntentHit? _matchCapabilityNo(String lower) {
-  if (RegExp(
-    r'\bcan you (?:talk|speak|sing|walk)\b'
-    r'|\bsay something\b',
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'no'})],
-      reason: 'cannot-do',
-    );
-  }
-  return null;
-}
+///
+/// Runs before the mood clusters because it owns verbs they would otherwise
+/// claim: `say something` (greeting), `play music` (play), `sing` (dance).
+/// Things the body *can* do — wiggle, dance, blink, chirp — stay off the
+/// list on purpose.
+FastIntentHit? _matchCapabilityNo(String lower) =>
+    _matchBuckets(lower, _capabilityBuckets);
 
-FastIntentHit? _matchDance(String lower) {
-  if (RegExp(
-    r'\b(?:dance|wiggle|do a (?:little )?dance)\b',
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'delighted'})],
-      reason: 'dance',
-    );
-  }
-  return null;
-}
+final _capabilityBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\bcan you (?:talk|speak|sing|say|whistle|read|write|walk|run|jump'
+    r'|fly|swim|drive|cook|type|shout|yell|whisper|call)\b'
+    r'|\bsay something\b|\bsay (?:hi|hello|my name|that|it)\b'
+    r'|\bsing (?:me )?a song\b|\bsing along\b'
+    r'|\btell me (?:a joke|a story|the time|a secret|about)\b'
+    r"|\bwhat time is it\b|\bwhat'?s the (?:time|weather)\b"
+    r'|\bplay (?:some )?(?:music|a song|the radio)\b'
+    r'|\bcan you fetch\b|\bfetch it\b',
+    BotMood.no,
+    'cannot-do',
+  ),
+];
 
-FastIntentHit? _matchPlay(String lower) {
-  if (RegExp(
-    r"\bwanna play\b|\blet'?s play\b|\bplay with me\b"
-    r'|\bpeek-?a-?boo\b|\btickle\b',
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'playful'})],
-      reason: 'play',
-    );
-  }
-  return null;
-}
+/// Acknowledge the request. Deliberately above the frustration buckets:
+/// "be quiet" is something the bot can agree to, not a mood to mirror.
+/// `stop it` / `stop beeping` stay with the LLM (no timer word, and they
+/// are not hush/quiet).
+FastIntentHit? _matchQuiet(String lower) =>
+    _matchBuckets(lower, _quietBuckets);
 
-FastIntentHit? _matchStartle(String lower) {
-  if (RegExp(r'\bboo\b|\bsurprise\b').hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'startled'})],
-      reason: 'startle',
-    );
-  }
-  return null;
-}
+final _quietBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\bbe quiet\b|\bstay quiet\b|\bkeep quiet\b|\bquiet down\b'
+    r'|\bquiet please\b'
+    r'|\bkeep it down\b|\bpipe down\b|\bhush\b|\bshush\b|\bsh{2,}\b'
+    r'|\btoo loud\b|\bnot so loud\b|\bless noise\b|\bno noise\b'
+    r'|\bsilence please\b|\bsettle down\b|\bcalm down\b|\bbe still\b'
+    r'|\bindoor voice\b',
+    BotMood.yes,
+    'quiet',
+  ),
+];
 
-FastIntentHit? _matchThanksPraise(String lower) {
-  if (RegExp(r'\bthank you\b|\bthanks\b').hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'happy'})],
-      reason: 'thanks',
-    );
-  }
-  if (RegExp(
-    r'\bwell done\b|\bgood job\b|\byou did it\b'
-    r'|\bproud of you\b|\bnice work\b',
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'proud'})],
-      reason: 'well-done',
-    );
-  }
-  return null;
-}
+/// Conservative: the insult has to land on the bot, so "bad day" stays with
+/// the comfort matcher below. Runs before praise so a mixed utterance
+/// resolves to the complaint, and before comfort so "bad bot" is a scold.
+///
+/// `silly` / `goofy` are *not* scold words here — they read as affectionate
+/// teasing, so they belong to the play bucket.
+FastIntentHit? _matchScold(String lower) =>
+    _matchBuckets(lower, _scoldBuckets);
 
-/// Conservative: only with `bot`/`robot` attached, so "bad day" stays
-/// with the comfort matcher.
-FastIntentHit? _matchScold(String lower) {
-  if (RegExp(
-    r'\b(?:bad|stupid)\s+(?:little\s+)?(?:bot|robot)\b',
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'sad'})],
-      reason: 'scold',
-    );
-  }
-  return null;
-}
+final _scoldBuckets = <_MoodBucket>[
+  _MoodBucket(
+    _addressed(
+          'bad|stupid|dumb|naughty|useless|broken|worthless|terrible|awful'
+          '|horrible|annoying|noisy|lazy|rubbish',
+          _scoldNoun,
+        ) +
+        r"|\byou(?:'?re| are)\s+(?:so\s+|such\s+a\s+|being\s+|really\s+)*"
+        r'(?:bad|naughty|useless|broken|annoying|in trouble|a menace)\b'
+        r'|\bgo away\b|\bleave me alone\b|\bget lost\b|\bshame on you\b'
+        r"|\bi'?m mad at you\b|\bi'?m cross with you\b|\bnaughty\b"
+        r'|\bstop bothering me\b',
+    BotMood.sad,
+    'scold',
+  ),
+];
 
-FastIntentHit? _matchComfort(String lower) {
-  if (RegExp(
-    r"\bi'?m sad\b|\bi am sad\b|\bfeeling down\b"
-    r'|\b(?:bad|rough) day\b',
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'sad'})],
-      reason: 'comfort',
-    );
-  }
-  return null;
-}
+/// Thanks / well-done / address-style compliments. Above [_matchAffection]
+/// so "sweet boy" is praise while a bare "you're sweet" is affection, and
+/// above the play and greeting buckets so "good job, buddy" cannot be read
+/// as either.
+FastIntentHit? _matchPraise(String lower) =>
+    _matchBuckets(lower, _praiseBuckets);
 
-/// Acknowledge the request. `stop it` / `stop beeping` stay with the LLM
-/// (no timer word, and they are not hush/quiet).
-FastIntentHit? _matchQuiet(String lower) {
-  if (RegExp(
-    r'\bbe quiet\b|\bquiet down\b|\bhush\b|\btoo loud\b|\bsh{2,}\b',
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'yes'})],
-      reason: 'quiet',
-    );
-  }
-  return null;
-}
+final _praiseBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\bthank you\b|\bthanks\b|\bthank u\b|\bthx\b|\bta very much\b'
+    r'|\bappreciate (?:it|you|that)\b|\bmuch obliged\b',
+    BotMood.happy,
+    'thanks',
+  ),
+  // Achievement praise reads as pride rather than plain happiness.
+  _MoodBucket(
+    r'\bwell done\b|\bgood job\b|\bnice job\b|\bgreat job\b|\bgood work\b'
+    r'|\bnice work\b|\bgreat work\b|\bnice one\b|\byou did it\b'
+    r'|\byou nailed it\b|\bnailed it\b|\bproud of you\b|\bway to go\b'
+    r'|\bwell played\b|\bbravo\b|\batta ?(?:boy|girl)\b|\bgood call\b'
+    r'|\byou got it right\b|\bperfect job\b',
+    BotMood.proud,
+    'well-done',
+  ),
+  _MoodBucket(
+    _addressed(
+          'good|great|sweet|clever|smart|brilliant|best|brave|nice|lovely'
+          '|precious|perfect|amazing|awesome|wonderful|excellent|handsome'
+          '|pretty|champion|star',
+          _petNoun,
+        ) +
+        r"|\byou(?:'?re| are)\s+(?:such\s+)?(?:a\s+|the\s+|so\s+|very\s+"
+        r'|really\s+|quite\s+)*(?:good|great|clever|smart|brilliant|amazing'
+        r'|awesome|wonderful|excellent|impressive|helpful|the best|best)\b'
+        r'|\bgood (?:helper|listener|little helper)\b'
+        r"|\byou'?re my favou?rite\b|\bbest (?:bot|robot|buddy|boy|girl) ever\b"
+        r'|\bnice bot\b|\bwhat a (?:good|clever|smart) (?:bot|boy|girl)\b'
+        r'|\bi like you\b|\byou did great\b',
+    BotMood.happy,
+    'praise',
+  ),
+];
 
-FastIntentHit? _matchAffection(String lower) {
-  if (RegExp(
-    r"\b(?:love you|i love you|you're cute|you are cute)\b"
-    r'|\bmiss(?:ed)? you\b',
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'love'})],
-      reason: 'affection',
-    );
-  }
-  if (RegExp(r'\bgood (?:little )?(?:bot|robot|guy)\b').hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'happy'})],
-      reason: 'praise',
-    );
-  }
-  return null;
-}
+/// Dance / wiggle, plus the celebration cluster — both land on `delighted`,
+/// but they keep separate reasons so the route log stays legible.
+/// "boogie" is intentionally missing: `boogie time` is not a dance request.
+FastIntentHit? _matchDance(String lower) =>
+    _matchBuckets(lower, _danceBuckets);
 
-FastIntentHit? _matchFarewell(String lower) {
-  // Winding down for the night → sleepy.
-  if (RegExp(
-    r'\bgo to sleep\b|\bnap time\b|\btime for bed\b|\bbedtime\b'
-    r'|\bsweet dreams\b|\bsee you tomorrow\b',
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'sleepy'})],
-      reason: 'wind-down',
-    );
-  }
-  // Leaving → the bot is sad to see you go.
-  if (RegExp(
-    r'\bgood-?bye\b|\bbye\b|\bsee you later\b|\bgotta go\b'
-    r"|\bi'?m leaving\b|\bi'?m heading out\b",
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'sad'})],
-      reason: 'goodbye',
-    );
-  }
-  return null;
-}
+final _danceBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\bdance\b|\bdancing\b|\bwiggle\b|\bwiggles\b|\bshimmy\b'
+    r'|\bshake it\b|\bspin around\b|\bbust a move\b|\bdance party\b',
+    BotMood.delighted,
+    'dance',
+  ),
+  _MoodBucket(
+    r'\byay+\b|\bwoo-?hoo+\b|\bwoo+\b|\byippee\b|\bhoo?ray\b|\bhurray\b'
+    r"|\bwe did it\b|\bi did it\b|\bwe won\b|\bi won\b|\blet'?s celebrate\b"
+    r'|\bcelebrate\b|\bparty time\b|\bgreat news\b|\bguess what\b'
+    r"|\bi'?m (?:so |really )?excited\b|\bso exciting\b|\bhow exciting\b"
+    r'|\bi got the job\b|\bcongrats\b|\bcongratulations\b|\bit worked\b',
+    BotMood.delighted,
+    'celebrate',
+  ),
+];
 
-FastIntentHit? _matchGreeting(String lower) {
-  if (RegExp(r'\bgood night\b').hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'sleepy'})],
-      reason: 'good-night',
-    );
-  }
-  if (RegExp(
-    r"\b(?:hey|hi|hello)\b"
-    r"|\byou awake\b"
-    r"|\bwhat'?s up\b"
-    r"|\bgood (?:morning|evening|afternoon)\b",
-  ).hasMatch(lower)) {
-    return const FastIntentHit(
-      [ToolCall('express', {'mood': 'curious'})],
-      reason: 'greeting',
-    );
-  }
-  return null;
-}
+/// Invitations to mess about. The `let's go` rule carries a lookahead so
+/// "let's go to bed" keeps falling through to the sleepy bucket.
+FastIntentHit? _matchPlay(String lower) => _matchBuckets(lower, _playBuckets);
+
+final _playBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r"\bwan?na play\b|\blet'?s play\b|\bplay with me\b|\bplay ?time\b"
+    r'|\bpeek-?a-?boo\b|\btickle\b|\bhide and seek\b|\bplay tag\b'
+    r"|\btag,? you'?re it\b|\bchase me\b|\bcatch me\b|\brace you\b"
+    r'|\bhigh five\b|\bboop\b'
+    r"|\blet'?s go\b(?!\s+(?:to|home|out|inside|upstairs)\b)"
+    r'|\bdo (?:it|that) again\b|\bone more time\b|\bonce more\b|^again\b'
+    r"|\byou(?:'?re| are)\s+(?:so\s+|such\s+a\s+)*"
+    r'(?:silly|goofy|cheeky|funny)\b'
+    r'|\bsilly (?:bot|robot|boy|girl|guy)\b|\bwhat a goof\b'
+    r'|\bdo a trick\b|\bshow me a trick\b|\bfun time\b|\bhaving fun\b'
+    r'|\bare you ticklish\b',
+    BotMood.playful,
+    'play',
+  ),
+];
+
+/// Deliberately tiny. `boo` is word-bounded so "boogie" cannot reach it, and
+/// the lookaheads keep "boo hoo" (crying) and "surprise party" (a plan) out.
+FastIntentHit? _matchStartle(String lower) =>
+    _matchBuckets(lower, _startleBuckets);
+
+final _startleBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\bboo\b(?!\s*hoo)|\bsurprise\b(?!\s+party)|\bgotcha\b'
+    r'|\bwatch out\b|\blook out\b|\bheads up\b',
+    BotMood.startled,
+    'startle',
+  ),
+];
+
+/// First-person distress only. Open-ended emotional talk ("I am feeling a
+/// bit sad today") stays with the LLM on purpose — the fast path can only
+/// blink a colour, and hedged sadness deserves the model's turn.
+///
+/// The intensifier list excludes `feeling`, which is exactly what keeps
+/// that sentence a miss.
+FastIntentHit? _matchComfort(String lower) =>
+    _matchBuckets(lower, _comfortBuckets);
+
+final _comfortBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r"\bi(?:'?m| am)\s+(?:so\s+|really\s+|very\s+|super\s+|just\s+|kinda\s+"
+    r'|quite\s+|pretty\s+)*(?:sad|down|blue|lonely|stressed|upset|miserable'
+    r'|heartbroken|overwhelmed|worn out|fed up|struggling)\b'
+    r'|\bfeeling (?:down|low|blue|awful|terrible|lousy|rough|rubbish)\b'
+    r'|\b(?:bad|rough|long|hard|terrible|awful|horrible|tough|stressful)'
+    r'\s+(?:day|week|morning|night|shift)\b'
+    r'|\bworst day\b|\bi need a hug\b|\bi could use a hug\b'
+    r"|\bi feel awful\b|\bi'?m crying\b|\bi got fired\b|\bi failed\b"
+    r'|\bnothing went right\b|\bcheer me up\b|\bi miss (?:her|him|them)\b',
+    BotMood.sad,
+    'comfort',
+  ),
+];
+
+/// Winding down. Sits below comfort so "i'm exhausted and sad" reads as
+/// sadness, and above farewell so "see you tomorrow" stays a sleepy
+/// goodnight rather than a sad goodbye.
+///
+/// `good night` is *not* here: it keeps its own `good-night` reason in
+/// [_matchGreeting].
+FastIntentHit? _matchSleepy(String lower) =>
+    _matchBuckets(lower, _sleepyBuckets);
+
+final _sleepyBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\bgo to sleep\b|\bgo to bed\b|\bgoing to (?:sleep|bed)\b|\bnap ?time\b'
+    r'|\btime for bed\b|\bbed ?time\b|\bsweet dreams\b|\bsee you tomorrow\b'
+    r'|\bnight night\b|\bnighty ?night\b|\blights out\b|\bturning in\b'
+    r'|\bsleep well\b|\bsleep tight\b|\bsleepy time\b|\bcall it a night\b'
+    r'|\bcall it a day\b|\brest now\b|\bget some rest\b',
+    BotMood.sleepy,
+    'wind-down',
+  ),
+  _MoodBucket(
+    r"\bi(?:'?m| am)\s+(?:so\s+|really\s+|very\s+|super\s+|just\s+|kinda\s+"
+    r'|quite\s+|pretty\s+)*(?:tired|sleepy|exhausted|beat|knackered|drained'
+    // "i'm tired *of* this" is frustration, not drowsiness.
+    r'|wiped|dozing off|falling asleep|off to bed|ready for bed)\b(?!\s+of\b)'
+    r'|\bneed (?:a nap|some sleep|to sleep|sleep)\b|\btaking a nap\b'
+    r'|\byawn(?:ing)?\b|\bso sleepy\b|\bso tired\b|\bcan barely keep my eyes\b'
+    r'|\bare you sleepy\b|\bare you tired\b',
+    BotMood.sleepy,
+    'sleepy',
+  ),
+];
+
+/// Interjection-level frustration. Last of the negative moods on purpose:
+/// `stop the timer` is already a cancel, `be quiet` is already a request,
+/// and a stated feeling ("i'm stressed") should win over a grumble. No
+/// `stop …` rule lives here, which is what keeps "stop beeping" a miss.
+FastIntentHit? _matchAnnoyed(String lower) =>
+    _matchBuckets(lower, _annoyedBuckets);
+
+final _annoyedBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\bugh+\b|\bgrr+\b|\bargh+\b|\bblah\b|\boh (?:man|no)\b'
+    // Bare "that's enough" only — "that's enough sugar" is about the sugar.
+    r"|\benough already\b|\bthat'?s enough\b(?!\s+\w)|\benough of that\b"
+    r'|\bknock it off\b|\bcut it out\b|\boh come on\b|\bcome on now\b'
+    r'|\bseriously\b|\bnot again\b|\bso annoying\b|\bhow annoying\b'
+    r"|\bi'?m annoyed\b|\bi'?m frustrated\b|\bso frustrating\b"
+    r'|\bgive me a break\b|\bwhat a mess\b|\bfor crying out loud\b',
+    BotMood.annoyed,
+    'annoyed',
+  ),
+];
+
+/// Warmth aimed at the bot. Below comfort so "i need a hug" is answered with
+/// sympathy, not a purr, and below praise so "sweet girl" is happy while a
+/// plain "you're sweet" is love.
+FastIntentHit? _matchAffection(String lower) =>
+    _matchBuckets(lower, _affectionBuckets);
+
+final _affectionBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\blove (?:you|ya)\b|\bluv you\b|\bi love this (?:bot|robot|guy|thing)\b'
+    r'|\bmiss(?:ed)? (?:you|ya)\b'
+    r"|\byou(?:'?re| are)\s+(?:so\s+|too\s+|very\s+|really\s+|such\s+a\s+"
+    r'|the\s+)*(?:cute|adorable|sweet|lovely|precious|darling|charming'
+    r'|cutest|sweetest)\b'
+    r'|\bcutie\b|\bsweetie\b|\bsweetheart\b|\bmy little (?:guy|girl|buddy'
+    r'|friend|robot|bot|one)\b'
+    r'|\bhugs?\b|\bcuddle\b|\bsnuggle\b|\bsmooch\b'
+    r'|\bkiss (?:you|me)\b|\bkisses\b|\bkissy\b'
+    r'|\bcome here\b|\bcome to me\b|\bpet you\b|\bscratch your head\b'
+    r'|\byou make me happy\b|\bglad you'
+    r"'?re here\b|\bmy favou?rite (?:bot|robot|little)\b",
+    BotMood.love,
+    'affection',
+  ),
+];
+
+/// Honest bafflement. Narrow: only utterances that are explicitly about
+/// (mis)understanding, so ordinary questions still reach the LLM.
+FastIntentHit? _matchConfusion(String lower) =>
+    _matchBuckets(lower, _confusionBuckets);
+
+final _confusionBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\bhuh\b|\bwhat\?|\bwhat do you mean\b|\bwhat was that\b'
+    r'|\bdo you understand\b|\bdid you (?:get|catch|hear) that\b'
+    r'|\bdoes that make sense\b|\bmakes no sense\b'
+    r'|\bare you (?:confused|lost|stuck|broken)\b|\bany idea\b',
+    BotMood.confused,
+    'confused',
+  ),
+];
+
+/// Leaving. Below the sleepy bucket so bedtime phrasing wins, above the
+/// greeting catch-all so "see you" is not read as a hello.
+FastIntentHit? _matchFarewell(String lower) =>
+    _matchBuckets(lower, _farewellBuckets);
+
+final _farewellBuckets = <_MoodBucket>[
+  _MoodBucket(
+    r'\bgood-?bye\b|\bbye-?bye\b|\bbye\b|\bfarewell\b|\bciao\b|\badios\b'
+    r'|\bsee (?:you|ya)\b|\bcatch (?:you|ya) later\b'
+    r'|\btalk (?:to you )?later\b|\bgotta go\b|\bgot to go\b'
+    r"|\bi have to go\b|\bi need to go\b|\bi'?m leaving\b|\bleaving now\b"
+    r"|\bi'?m heading (?:out|off|home)\b|\bi'?m off\b|\bheading home\b"
+    r'|\btake care\b(?!\s+of\b)|\buntil tomorrow\b|\bback later\b'
+    r'|\bhave to run\b'
+    r'|\bwish me luck\b',
+    BotMood.sad,
+    'goodbye',
+  ),
+];
+
+/// The widest net in the file, so it runs last: hellos, pings, and
+/// are-you-there checks all land on `curious`.
+FastIntentHit? _matchGreeting(String lower) =>
+    _matchBuckets(lower, _greetingBuckets);
+
+final _greetingBuckets = <_MoodBucket>[
+  // Its own reason so the log distinguishes a goodnight from a hello.
+  _MoodBucket(r'\bgood night\b', BotMood.sleepy, 'good-night'),
+  _MoodBucket(
+    r'\b(?:hey|hi|hiya|hello|howdy|yo|sup|psst|greetings)\b'
+    r'|\bgood (?:morning|evening|afternoon)\b'
+    r'|\b(?:are )?you awake\b|\bwake up\b|\bare you (?:there|around|up)\b'
+    r"|\byou there\b|\banyone home\b|\banybody home\b|\bknock knock\b"
+    r'|\bcan you hear me\b|\bare you listening\b|\bcan you see me\b'
+    r"|\bwhat'?s up\b|\bwhat'?cha (?:doing|up to)\b"
+    r'|\bwhat are you (?:doing|up to)\b|\bwhat you (?:doing|up to)\b'
+    r'|\bare you (?:ok|okay|alright|well)\b|\bhow are you\b'
+    r"|\bhow'?s it going\b|\bhow you doing\b|\bare you busy\b"
+    r'|\blook at me\b|\bover here\b|\bdo you see me\b|\bpay attention\b'
+    r'|\bcheck this out\b|\blook what i\b',
+    BotMood.curious,
+    'greeting',
+  ),
+];
 
 /// Total seconds plus leftover label. Hours / minutes / seconds (and
 /// mixes like "1 minute 20 seconds") all land here.
