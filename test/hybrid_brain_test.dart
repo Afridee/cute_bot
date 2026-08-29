@@ -3,7 +3,6 @@ import 'dart:typed_data';
 import 'package:cute_bot/companion/brain/bot_brain.dart';
 import 'package:cute_bot/companion/brain/clip_asr.dart';
 import 'package:cute_bot/companion/brain/fake_brain.dart';
-import 'package:cute_bot/companion/brain/fast_intent_enroll.dart';
 import 'package:cute_bot/companion/brain/fast_intent_overlay.dart';
 import 'package:cute_bot/companion/brain/hybrid_brain.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -162,17 +161,11 @@ void main() {
 
   test('ASR overlay hit skips the inner brain', () async {
     var innerTurns = 0;
-    final overlay = buildFastIntentOverlay([
-      const VoiceEnrollSample(
-        prompt: 'Pause the timer',
-        intent: FastIntentId.pauseTimer,
-        transcripts: [
-          'WAS THE TEMPER',
-          'pose the tamper',
-          'pros the tamper bzz',
-        ],
+    const overlay = FastIntentOverlay(intents: {
+      FastIntentId.pauseTimer: FastIntentAliases(
+        phrases: ['was the temper'],
       ),
-    ]);
+    });
     final hybrid = HybridBrain(
       inner: _CountingBrain(_inner(), onRespond: () => innerTurns++),
       asr: _ScriptedAsr('WAS THE TEMPER BZZ'),

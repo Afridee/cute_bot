@@ -218,7 +218,8 @@ or Bot Simulator. Skip if the bot isn’t here.
 Zipformer (the on-device ASR) mangles some speakers so “Pause the timer”
 lands as `WAS THE TEMPER`. This step records those substitutions and
 overlays them on the fast-intent matcher. No Gemma. Alignment is
-deterministic.
+deterministic. The overlay only keeps substitutions seen in at least
+two takes.
 
 **UI:** 11 prompted lines, 5 successful transcripts each (empty / silence
 does not count). The line to say is the display type (one break). Line

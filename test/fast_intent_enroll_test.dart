@@ -10,8 +10,10 @@ VoiceEnrollSample _pauseTakes() => const VoiceEnrollSample(
       intent: FastIntentId.pauseTimer,
       transcripts: [
         'WAS THE TEMPER',
+        'WAS THE TEMPER',
         'pose the tamper',
-        'pros the tamper bzz',
+        'pose the tamper',
+        'CANSELED THE CAT',
       ],
     );
 
@@ -43,21 +45,53 @@ void main() {
   });
 
   group('aligner', () {
-    test('three pause takes → phrases, pose/pros verbs, temper/tamper nouns',
+    test('majority pause takes → repeated phrases/slots; hapax cough dropped',
         () {
       final overlay = buildFastIntentOverlay([_pauseTakes()]);
       final pause = overlay.of(FastIntentId.pauseTimer);
       expect(
         pause.phrases,
-        containsAll(['was the temper', 'pose the tamper', 'pros the tamper']),
+        containsAll(['was the temper', 'pose the tamper']),
       );
-      expect(pause.verb, containsAll(['pose', 'pros']));
+      expect(pause.phrases, isNot(contains('pros the tamper')));
+      expect(pause.phrases, isNot(contains('canseled the cat')));
+      expect(pause.verb, contains('pose'));
       expect(pause.verb, isNot(contains('was')));
+      expect(pause.verb, isNot(contains('canseled')));
       expect(pause.noun, containsAll(['temper', 'tamper']));
+      expect(pause.noun, isNot(contains('cat')));
     });
 
-    test('trailing unaligned junk is stripped from the phrase', () {
-      final overlay = buildFastIntentOverlay([_pauseTakes()]);
+    test('three distinct single takes drop hapax; shared noun may survive', () {
+      final overlay = buildFastIntentOverlay([
+        const VoiceEnrollSample(
+          prompt: 'Pause the timer',
+          intent: FastIntentId.pauseTimer,
+          transcripts: [
+            'WAS THE TEMPER',
+            'pose the tamper',
+            'pros the tamper bzz',
+          ],
+        ),
+      ]);
+      final pause = overlay.of(FastIntentId.pauseTimer);
+      expect(pause.phrases, isEmpty);
+      expect(pause.verb, isEmpty);
+      expect(pause.noun, ['tamper']);
+      expect(matchText('pause the timer')!.calls.single.name, 'pause_timer');
+    });
+
+    test('trailing unaligned junk is stripped from the stored phrase', () {
+      final overlay = buildFastIntentOverlay([
+        const VoiceEnrollSample(
+          prompt: 'Pause the timer',
+          intent: FastIntentId.pauseTimer,
+          transcripts: [
+            'pros the tamper bzz',
+            'pros the tamper bzz',
+          ],
+        ),
+      ]);
       expect(
         overlay.of(FastIntentId.pauseTimer).phrases,
         contains('pros the tamper'),
@@ -98,12 +132,46 @@ void main() {
           ],
         ),
       ]);
-      expect(overlay.of(FastIntentId.resumeTimer).phrases, isNotEmpty);
+      expect(overlay.of(FastIntentId.resumeTimer).phrases, contains('start the diamer'));
+      expect(overlay.of(FastIntentId.resumeTimer).phrases, isNot(contains('start the dimer')));
       expect(overlay.of(FastIntentId.resumeTimer).noun, contains('diamer'));
+      expect(overlay.of(FastIntentId.resumeTimer).noun, isNot(contains('dimer')));
       expect(overlay.of(FastIntentId.setTimer).isEmpty, isTrue);
     });
 
-    test('verb-less take stores the noun, not a noun-only phrase', () {
+    test('two verb-less takes store the noun, not a noun-only phrase', () {
+      final overlay = buildFastIntentOverlay([
+        const VoiceEnrollSample(
+          prompt: 'Resume the timer',
+          intent: FastIntentId.resumeTimer,
+          transcripts: ['THE DIAMOND', 'THE DIAMOND'],
+        ),
+      ]);
+      final resume = overlay.of(FastIntentId.resumeTimer);
+      expect(resume.noun, contains('diamond'));
+      expect(resume.phrases, isNot(contains('the diamond')));
+    });
+
+    test('same-intent lines share a phrase counter', () {
+      final overlay = buildFastIntentOverlay([
+        const VoiceEnrollSample(
+          prompt: 'Pause the timer',
+          intent: FastIntentId.pauseTimer,
+          transcripts: ['WAS THE TEMPER'],
+        ),
+        const VoiceEnrollSample(
+          prompt: 'Pause the tea timer',
+          intent: FastIntentId.pauseTimer,
+          transcripts: ['WAS THE TEMPER'],
+        ),
+      ]);
+      expect(
+        overlay.of(FastIntentId.pauseTimer).phrases,
+        contains('was the temper'),
+      );
+    });
+
+    test('a single verb-less take stores nothing', () {
       final overlay = buildFastIntentOverlay([
         const VoiceEnrollSample(
           prompt: 'Resume the timer',
@@ -111,9 +179,7 @@ void main() {
           transcripts: ['THE DIAMOND'],
         ),
       ]);
-      final resume = overlay.of(FastIntentId.resumeTimer);
-      expect(resume.noun, contains('diamond'));
-      expect(resume.phrases, isNot(contains('the diamond')));
+      expect(overlay.of(FastIntentId.resumeTimer).isEmpty, isTrue);
     });
   });
 

@@ -1,9 +1,13 @@
 /// Deterministic ASR enrollment: align prompt tokens to Zipformer
 /// transcripts and merge substitutions into a [FastIntentOverlay].
 ///
-/// No Gemma. Hapax substitutions are kept (speaker-stable) except a
-/// common-word blocklist, which stays phrases-only. Precision gates:
-/// collision with another intent's defaults/overlay drops the token.
+/// No Gemma. A phrase, verb alias, or noun alias is stored only if it
+/// appears in at least [kMinEnrollOccurrences] successful takes
+/// (majority vote). Hapax (count == 1) is dropped. The common-word
+/// blocklist is separate: words like `was` are never verb/noun aliases
+/// but may remain inside a phrase that itself passed the count gate.
+/// Precision gates: collision with another intent's defaults/overlay
+/// drops the token (run after the count filter).
 library;
 
 import 'fast_intent_overlay.dart';
@@ -48,6 +52,7 @@ const int kVoiceEnrollTakesTarget = 5;
 const int kVoiceEnrollSkipLineAfter = 3;
 const int kMaxPhrasesPerIntent = 12;
 const int kMaxAliasesPerSlot = 8;
+const int kMinEnrollOccurrences = 2;
 
 /// Dropped from alignment slots; kept in the stored phrase.
 const Set<String> kAlignStopwords = {
@@ -63,7 +68,8 @@ const Set<String> kAlignStopwords = {
   'um',
 };
 
-/// Never a verb/noun alias. Hapax substitutions like `was` stay phrases.
+/// Never a verb/noun alias. `was` is not a verb; a phrase containing
+/// `was` may still enroll if that phrase itself passes the count gate.
 const Set<String> kCommonWordBlocklist = {
   'was',
   'is',
@@ -193,7 +199,36 @@ const Map<FastIntentId, Set<String>> kDefaultIntentKeywords = {
 };
 
 /// Merge samples into an overlay. Empty / blank transcripts are ignored.
+/// Same-intent lines share a counter; hapax keys are dropped before
+/// [_unionCapped] and [_applyCollisionGates].
 FastIntentOverlay buildFastIntentOverlay(List<VoiceEnrollSample> samples) {
+  final phraseCounts = <FastIntentId, Map<String, int>>{
+    for (final id in FastIntentId.values) id: {},
+  };
+  final verbCounts = <FastIntentId, Map<String, int>>{
+    for (final id in FastIntentId.values) id: {},
+  };
+  final nounCounts = <FastIntentId, Map<String, int>>{
+    for (final id in FastIntentId.values) id: {},
+  };
+  final phraseOrder = <FastIntentId, List<String>>{
+    for (final id in FastIntentId.values) id: [],
+  };
+  final verbOrder = <FastIntentId, List<String>>{
+    for (final id in FastIntentId.values) id: [],
+  };
+  final nounOrder = <FastIntentId, List<String>>{
+    for (final id in FastIntentId.values) id: [],
+  };
+
+  for (final sample in samples) {
+    for (final take in _alignSample(sample)) {
+      _tally(phraseCounts[sample.intent]!, phraseOrder[sample.intent]!, take.phrase);
+      _tally(verbCounts[sample.intent]!, verbOrder[sample.intent]!, take.verb);
+      _tally(nounCounts[sample.intent]!, nounOrder[sample.intent]!, take.noun);
+    }
+  }
+
   final phrases = <FastIntentId, List<String>>{
     for (final id in FastIntentId.values) id: [],
   };
@@ -204,11 +239,22 @@ FastIntentOverlay buildFastIntentOverlay(List<VoiceEnrollSample> samples) {
     for (final id in FastIntentId.values) id: [],
   };
 
-  for (final sample in samples) {
-    final aligned = _alignSample(sample);
-    _unionCapped(phrases[sample.intent]!, aligned.phrases, kMaxPhrasesPerIntent);
-    _unionCapped(verbs[sample.intent]!, aligned.verbs, kMaxAliasesPerSlot);
-    _unionCapped(nouns[sample.intent]!, aligned.nouns, kMaxAliasesPerSlot);
+  for (final id in FastIntentId.values) {
+    _unionCapped(
+      phrases[id]!,
+      _survivors(phraseCounts[id]!, phraseOrder[id]!),
+      kMaxPhrasesPerIntent,
+    );
+    _unionCapped(
+      verbs[id]!,
+      _survivors(verbCounts[id]!, verbOrder[id]!),
+      kMaxAliasesPerSlot,
+    );
+    _unionCapped(
+      nouns[id]!,
+      _survivors(nounCounts[id]!, nounOrder[id]!),
+      kMaxAliasesPerSlot,
+    );
   }
 
   _applyCollisionGates(phrases, verbs, nouns);
@@ -223,6 +269,19 @@ FastIntentOverlay buildFastIntentOverlay(List<VoiceEnrollSample> samples) {
   });
 }
 
+void _tally(Map<String, int> counts, List<String> order, String? key) {
+  if (key == null) return;
+  counts[key] = (counts[key] ?? 0) + 1;
+  if (counts[key] == 1) order.add(key);
+}
+
+Iterable<String> _survivors(Map<String, int> counts, List<String> order) {
+  return [
+    for (final key in order)
+      if (counts[key]! >= kMinEnrollOccurrences) key,
+  ];
+}
+
 void _unionCapped(List<String> dest, Iterable<String> extra, int cap) {
   for (final item in extra) {
     if (dest.length >= cap) return;
@@ -230,29 +289,14 @@ void _unionCapped(List<String> dest, Iterable<String> extra, int cap) {
   }
 }
 
-class _AlignedSample {
-  const _AlignedSample({
-    required this.phrases,
-    required this.verbs,
-    required this.nouns,
-  });
-  final List<String> phrases;
-  final List<String> verbs;
-  final List<String> nouns;
-}
-
-_AlignedSample _alignSample(VoiceEnrollSample sample) {
-  final phrases = <String>[];
-  final verbs = <String>[];
-  final nouns = <String>[];
+List<_TakeResult> _alignSample(VoiceEnrollSample sample) {
+  final takes = <_TakeResult>[];
   for (final raw in sample.transcripts) {
     final take = _alignTake(sample.prompt, raw);
     if (take == null) continue;
-    if (take.phrase != null) _unionCapped(phrases, [take.phrase!], kMaxPhrasesPerIntent);
-    if (take.verb != null) _unionCapped(verbs, [take.verb!], kMaxAliasesPerSlot);
-    if (take.noun != null) _unionCapped(nouns, [take.noun!], kMaxAliasesPerSlot);
+    takes.add(take);
   }
-  return _AlignedSample(phrases: phrases, verbs: verbs, nouns: nouns);
+  return takes;
 }
 
 class _TakeResult {
