@@ -31,8 +31,8 @@ FastIntentHit? matchText(String text, [FastIntentOverlay? overlay]) {
   if (_negated(lower)) return null;
 
   return _matchTimerFire(lower) ??
-      _matchCancelTimer(trimmed, lower, overlay) ??
-      _matchPauseTimer(trimmed, lower, overlay) ??
+      _matchCancelTimer(lower, overlay) ??
+      _matchPauseTimer(lower, overlay) ??
       _matchResumeTimer(trimmed, lower, overlay) ??
       _matchSetTimer(trimmed, lower, overlay) ??
       _matchBattery(lower, overlay) ??
@@ -116,7 +116,6 @@ FastIntentHit? _matchTimerFire(String lower) {
 }
 
 FastIntentHit? _matchCancelTimer(
-  String original,
   String lower,
   FastIntentOverlay? overlay,
 ) {
@@ -129,32 +128,21 @@ FastIntentHit? _matchCancelTimer(
   )) {
     return null;
   }
-  final label = _timerControlLabel(original, overlay);
-  return FastIntentHit(
-    [
-      ToolCall('cancel_timer', {
-        'label': ?label,
-      }),
-    ],
+  return const FastIntentHit(
+    [ToolCall('cancel_timer', {})],
     reason: 'cancel-timer',
   );
 }
 
 FastIntentHit? _matchPauseTimer(
-  String original,
   String lower,
   FastIntentOverlay? overlay,
 ) {
   if (!_controlHit(lower, overlay, FastIntentId.pauseTimer, _pauseVerbs)) {
     return null;
   }
-  final label = _timerControlLabel(original, overlay);
-  return FastIntentHit(
-    [
-      ToolCall('pause_timer', {
-        'label': ?label,
-      }),
-    ],
+  return const FastIntentHit(
+    [ToolCall('pause_timer', {})],
     reason: 'pause-timer',
   );
 }
@@ -169,13 +157,8 @@ FastIntentHit? _matchResumeTimer(
   if (!_controlHit(lower, overlay, FastIntentId.resumeTimer, _resumeVerbs)) {
     return null;
   }
-  final label = _timerControlLabel(original, overlay);
-  return FastIntentHit(
-    [
-      ToolCall('resume_timer', {
-        'label': ?label,
-      }),
-    ],
+  return const FastIntentHit(
+    [ToolCall('resume_timer', {})],
     reason: 'resume-timer',
   );
 }
@@ -742,68 +725,4 @@ String _labelAfter(String original, int endInLower) {
   );
   if (rest.isEmpty) return 'timer';
   return rest;
-}
-
-/// Leftover words after stripping cancel/pause/resume phrasing. Null when
-/// the utterance did not name a specific timer.
-String? _timerControlLabel(String original, [FastIntentOverlay? overlay]) {
-  final extraNouns = _timerOverlayNouns(overlay);
-  final extra = <String>[
-    ...extraNouns,
-    for (final id in _timerControlIds) ...[
-      ...?overlay?.of(id).verb,
-      ..._phraseCueTokens(overlay?.of(id).phrases ?? const [], extraNouns),
-    ],
-  ];
-  final known = <String>{
-    ..._cancelVerbs,
-    ..._pauseVerbs,
-    ..._resumeVerbs,
-    ..._timerNouns,
-    'please',
-    'turn',
-    'off',
-    'again',
-    'the',
-    'my',
-    'this',
-    'a',
-    'an',
-    'for',
-    'called',
-    'labelled',
-    'labeled',
-    'named',
-    'on',
-    ...extra,
-  };
-  var rest = original.replaceAll(
-    RegExp(
-      '\\b(?:${known.map(RegExp.escape).join('|')})\\b',
-      caseSensitive: false,
-    ),
-    ' ',
-  );
-  rest = rest.replaceAll(RegExp(r'[^\w\s]+'), ' ');
-  rest = rest.replaceAll(RegExp(r'\s+'), ' ').trim();
-  if (rest.isEmpty) return null;
-  final kept = [
-    for (final tok in tokenizeUtterance(rest))
-      if (!_isStrippedControlToken(tok, extra)) tok,
-  ];
-  if (kept.isEmpty) return null;
-  return kept.join(' ');
-}
-
-bool _isStrippedControlToken(String tok, List<String> extra) {
-  if (_fuzzyVerbToken(tok, _cancelVerbs) ||
-      _fuzzyVerbToken(tok, _pauseVerbs) ||
-      _fuzzyVerbToken(tok, _resumeVerbs)) {
-    return true;
-  }
-  if (_timerNouns.contains(tok) || _tokenIsNearMissTimer(tok)) return true;
-  for (final e in extra) {
-    if (tok == e) return true;
-  }
-  return false;
 }

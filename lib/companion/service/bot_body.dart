@@ -31,7 +31,8 @@ final class ToolInvokeResult {
   /// Newly armed timer, if this was a successful `set_timer`.
   final PendingTimer? armed;
 
-  /// Id of a timer just dropped by `cancel_timer`.
+  /// Id of a timer just dropped by `cancel_timer`, or replaced by
+  /// `set_timer`. BotService must cancel that Dart [Timer] so it cannot fire.
   final String? cancelledId;
 
   /// Timer after a successful `pause_timer` (Dart clock should stop).
@@ -200,6 +201,11 @@ final class BotBody {
       firesAt: t.add(Duration(seconds: totalSeconds)),
       durationSeconds: totalSeconds,
     );
+    String? replacedId;
+    for (final old in List<PendingTimer>.from(timers.pending)) {
+      await timers.remove(old.id);
+      replacedId ??= old.id;
+    }
     final stored = await timers.add(timer);
     if (!stored) {
       return const ToolInvokeResult({
@@ -222,11 +228,12 @@ final class BotBody {
         'firesAt': timer.firesAt.toIso8601String(),
       },
       armed: timer,
+      cancelledId: replacedId,
     );
   }
 
-  Future<ToolInvokeResult> _cancelTimer(Map<String, Object?> args) async {
-    final target = _resolveTimer(args['label']);
+  Future<ToolInvokeResult> _cancelTimer(Map<String, Object?> _) async {
+    final target = _resolveTimer();
     if (target == null) return _noMatchingTimer('tool cancel_timer');
     await timers.remove(target.id);
     Log.i(_tag, 'timer ${target.id} cancelled ("${target.label}")');
@@ -241,8 +248,8 @@ final class BotBody {
     );
   }
 
-  Future<ToolInvokeResult> _pauseTimer(Map<String, Object?> args) async {
-    final target = _resolveTimer(args['label']);
+  Future<ToolInvokeResult> _pauseTimer(Map<String, Object?> _) async {
+    final target = _resolveTimer();
     if (target == null) return _noMatchingTimer('tool pause_timer');
     final paused = target.pauseAt(now());
     await timers.update(paused);
@@ -260,8 +267,8 @@ final class BotBody {
     );
   }
 
-  Future<ToolInvokeResult> _resumeTimer(Map<String, Object?> args) async {
-    final target = _resolveTimer(args['label'], preferPaused: true);
+  Future<ToolInvokeResult> _resumeTimer(Map<String, Object?> _) async {
+    final target = _resolveTimer(preferPaused: true);
     if (target == null) return _noMatchingTimer('tool resume_timer');
     final resumed = target.resumeAt(now());
     await timers.update(resumed);
@@ -284,15 +291,8 @@ final class BotBody {
     return const ToolInvokeResult({'error': 'no matching timer'});
   }
 
-  PendingTimer? _resolveTimer(Object? labelArg, {bool preferPaused = false}) {
-    final label = labelArg is String && labelArg.trim().isNotEmpty
-        ? labelArg.trim()
-        : null;
-    return pickTimer(
-      timers.pending,
-      label: label,
-      preferPaused: preferPaused,
-    );
+  PendingTimer? _resolveTimer({bool preferPaused = false}) {
+    return pickTimer(timers.pending, preferPaused: preferPaused);
   }
 }
 

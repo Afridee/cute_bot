@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:cute_bot/companion/brain/transcript.dart';
 import 'package:cute_bot/companion/service/timer_store.dart';
 import 'package:cute_bot/shared/timer_display.dart';
@@ -193,8 +195,6 @@ void main() {
       );
       expect(pickTimer([running, paused])?.id, 'run');
       expect(pickTimer([running, paused], preferPaused: true)?.id, 'pause');
-      expect(pickTimer([running, paused], label: 'bread')?.id, 'pause');
-      expect(pickTimer([running, paused], label: 'tea')?.id, 'run');
     });
   });
 
@@ -228,15 +228,8 @@ void main() {
         label: 'a',
         firesAt: DateTime.fromMillisecondsSinceEpoch(1),
       ));
-      await store.add(PendingTimer(
-        id: 'b',
-        minutes: 1,
-        label: 'b',
-        firesAt: DateTime.fromMillisecondsSinceEpoch(2),
-      ));
       expect((await store.remove('a'))?.id, 'a');
-      expect(await TimerStore(backing).load(), hasLength(1));
-      expect((await TimerStore(backing).load()).single.id, 'b');
+      expect(await TimerStore(backing).load(), isEmpty);
     });
 
     test('update persists a pause across load', () async {
@@ -257,19 +250,18 @@ void main() {
     });
 
     test('caps at maxPending', () async {
+      expect(TimerStore.maxPending, 1);
       final store = TimerStore(InMemoryKeyValueStore());
       await store.load();
-      for (var i = 0; i < TimerStore.maxPending; i++) {
-        expect(
-          await store.add(PendingTimer(
-            id: 't$i',
-            minutes: 1,
-            label: 'n',
-            firesAt: DateTime.fromMillisecondsSinceEpoch(i),
-          )),
-          isTrue,
-        );
-      }
+      expect(
+        await store.add(PendingTimer(
+          id: 't0',
+          minutes: 1,
+          label: 'n',
+          firesAt: DateTime.fromMillisecondsSinceEpoch(0),
+        )),
+        isTrue,
+      );
       expect(
         await store.add(PendingTimer(
           id: 'overflow',
@@ -279,7 +271,33 @@ void main() {
         )),
         isFalse,
       );
-      expect(store.pending, hasLength(TimerStore.maxPending));
+      expect(store.pending, hasLength(1));
+      expect(store.pending.single.id, 't0');
+    });
+
+    test('load of many timers keeps one and persists the trim', () async {
+      final backing = InMemoryKeyValueStore();
+      final early = PendingTimer(
+        id: 'early',
+        minutes: 1,
+        label: 'tea',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(100),
+      );
+      final later = PendingTimer(
+        id: 'later',
+        minutes: 5,
+        label: 'bread',
+        firesAt: DateTime.fromMillisecondsSinceEpoch(500),
+      );
+      backing.values[TimerStore.storageKey] =
+          jsonEncode([early.toMap(), later.toMap()]);
+      final store = TimerStore(backing);
+      final loaded = await store.load();
+      expect(loaded, hasLength(1));
+      expect(loaded.single.id, 'early');
+      final again = await TimerStore(backing).load();
+      expect(again, hasLength(1));
+      expect(again.single.id, 'early');
     });
 
     test('corrupt data recovers empty', () async {

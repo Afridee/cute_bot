@@ -132,8 +132,8 @@ final class TimerStore {
 
   static const String storageKey = 'timers_v1';
 
-  /// Hard cap — a desk robot is not a calendar.
-  static const int maxPending = 8;
+  /// Hard cap — one pending clock. A desk robot is not a calendar.
+  static const int maxPending = 1;
 
   final KeyValueStore _store;
   final List<PendingTimer> _timers = [];
@@ -156,6 +156,12 @@ final class TimerStore {
       }
     } on FormatException {
       // Corrupt store: start empty rather than wedging recovery.
+    }
+    if (_timers.length > maxPending) {
+      final keep = timerForDisplay(_timers);
+      _timers.clear();
+      if (keep != null) _timers.add(keep);
+      await _persist();
     }
     return pending;
   }
@@ -209,9 +215,12 @@ final class TimerStore {
 }
 
 /// Allocates a unique-enough id without a uuid package.
+int _timerIdSeq = 0;
+
 String newTimerId([DateTime? now]) {
   final t = now ?? DateTime.now();
-  return 't${t.microsecondsSinceEpoch}';
+  _timerIdSeq += 1;
+  return 't${t.microsecondsSinceEpoch}_$_timerIdSeq';
 }
 
 /// Soonest-firing *running* timer, or null if none are running.
@@ -241,25 +250,14 @@ PendingTimer? timerForDisplay(Iterable<PendingTimer> pending, [DateTime? now]) {
   return best;
 }
 
-/// Picks a timer for cancel / pause / resume. Optional [label] is
-/// case-insensitive exact, then substring. [preferPaused] is for resume;
+/// Picks the pending timer for cancel / pause / resume. Labels are
+/// metadata only and never used to select. [preferPaused] is for resume;
 /// otherwise running timers win, then paused.
 PendingTimer? pickTimer(
   Iterable<PendingTimer> pending, {
-  String? label,
   bool preferPaused = false,
 }) {
-  var pool = pending.toList();
-  if (label != null && label.trim().isNotEmpty) {
-    final want = label.trim().toLowerCase();
-    var matched =
-        pool.where((t) => t.label.toLowerCase() == want).toList();
-    if (matched.isEmpty) {
-      matched =
-          pool.where((t) => t.label.toLowerCase().contains(want)).toList();
-    }
-    pool = matched;
-  }
+  final pool = pending.toList();
   if (pool.isEmpty) return null;
   final preferred = preferPaused
       ? pool.where((t) => t.isPaused).toList()

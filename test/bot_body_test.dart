@@ -175,28 +175,37 @@ void main() {
     expect(timers.pending.single.isPaused, isFalse);
   });
 
-  test('pause_timer / cancel_timer match by label', () async {
-    final t = DateTime.fromMillisecondsSinceEpoch(1_000_000);
-    await timers.add(PendingTimer(
-      id: 'tea-id',
-      minutes: 3,
-      label: 'tea',
-      firesAt: t.add(const Duration(minutes: 3)),
-    ));
-    await timers.add(PendingTimer(
-      id: 'bread-id',
-      minutes: 5,
-      label: 'bread',
-      firesAt: t.add(const Duration(minutes: 5)),
-    ));
-    final paused = await body.invoke('pause_timer', {'label': 'tea'});
-    expect(paused.paused!.id, 'tea-id');
-    expect(timers.pending.where((x) => x.id == 'tea-id').single.isPaused, isTrue);
-    expect(
-        timers.pending.where((x) => x.id == 'bread-id').single.isPaused, isFalse);
+  test('set_timer replaces a pending timer and exposes the old id', () async {
+    final first = await body.invoke('set_timer', {'seconds': 20, 'label': 'rest'});
+    expect(first.result['status'], 'ok');
+    expect(timers.pending, hasLength(1));
+    final oldId = first.armed!.id;
+    sent.clear();
+    final second =
+        await body.invoke('set_timer', {'minutes': 15, 'label': 'tea'});
+    expect(second.result['status'], 'ok');
+    expect(timers.pending, hasLength(1));
+    expect(timers.pending.single.totalSeconds, 15 * 60);
+    expect(timers.pending.single.label, 'tea');
+    expect(second.armed!.id, isNot(oldId));
+    expect(second.cancelledId, oldId);
+    expect(sent, isNotEmpty);
+  });
 
-    final cancelled = await body.invoke('cancel_timer', {'label': 'bread'});
-    expect(cancelled.cancelledId, 'bread-id');
-    expect(timers.pending.single.id, 'tea-id');
+  test('cancel_timer / pause_timer / resume_timer ignore label', () async {
+    await body.invoke('set_timer', {'minutes': 3, 'label': 'timer'});
+    final paused = await body.invoke('pause_timer', {'label': 'tea'});
+    expect(paused.result['status'], 'ok');
+    expect(paused.paused, isNotNull);
+    expect(timers.pending.single.isPaused, isTrue);
+
+    final resumed = await body.invoke('resume_timer', {'label': 'bogus'});
+    expect(resumed.result['status'], 'ok');
+    expect(timers.pending.single.isPaused, isFalse);
+
+    final cancelled = await body.invoke('cancel_timer', {'label': 'tea'});
+    expect(cancelled.result['status'], 'ok');
+    expect(cancelled.cancelledId, isNotNull);
+    expect(timers.pending, isEmpty);
   });
 }
