@@ -243,8 +243,8 @@ void main() {
     test('recovers cancel_timer / pause_timer / resume_timer', () {
       expect(parseLeakedToolCalls('cancel_timer()').single.transcriptLine,
           'cancel_timer()');
-      expect(parseLeakedToolCalls('pause_timer(tea)').single.arguments['label'],
-          'tea');
+      expect(parseLeakedToolCalls('pause_timer(tea)').single.transcriptLine,
+          'pause_timer()');
       expect(parseLeakedToolCalls('resume_timer()').single.name, 'resume_timer');
     });
   });

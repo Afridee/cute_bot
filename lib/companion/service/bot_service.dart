@@ -659,12 +659,15 @@ final class BotTaskHandler extends TaskHandler {
     }
     try {
       final invoked = await body.invoke(name, args);
-      if (invoked.armed != null) _armTimer(invoked.armed!);
       if (invoked.cancelledId != null) {
         _dartTimers.remove(invoked.cancelledId)?.cancel();
-        _logActivity('Timer cancelled: ${invoked.result['label'] ?? invoked.cancelledId}');
+        if (invoked.armed == null) {
+          _logActivity(
+              'Timer cancelled: ${invoked.result['label'] ?? invoked.cancelledId}');
+        }
         _syncTimerCaptionTicker();
       }
+      if (invoked.armed != null) _armTimer(invoked.armed!);
       if (invoked.paused != null) {
         _dartTimers.remove(invoked.paused!.id)?.cancel();
         _logActivity('Timer paused: ${invoked.paused!.label}');
@@ -695,6 +698,9 @@ final class BotTaskHandler extends TaskHandler {
   }
 
   void _armTimer(PendingTimer timer) {
+    for (final id in _dartTimers.keys.toList()) {
+      if (id != timer.id) _dartTimers.remove(id)?.cancel();
+    }
     _dartTimers[timer.id]?.cancel();
     final delay = timer.remainingAt(DateTime.now());
     if (delay == Duration.zero) {

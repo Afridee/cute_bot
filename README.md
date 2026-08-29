@@ -187,12 +187,13 @@ Tool dispatch lives in `BotBody`. `set_led` / `wiggle` / `play_sound`
 are BLE control writes (the simulator already shows them). `get_battery`
 writes the command, waits up to 2 s for telemetry, and returns
 percent / mV to the model. `set_timer` persists on the same KV store as
-the transcript (survives kill → restart) and arms a Dart timer; when it
-fires, the announcement enters `BrainSession.handleCue` on the **same**
-serialized conversation queue as spoken turns — never a second LiteRT
-session. Due timers restore after brain warm-up. `cancel_timer`,
-`pause_timer`, and `resume_timer` drop, freeze, or continue a pending
-countdown (the OLED stays on the last `HH:MM:SS` while paused).
+the transcript (survives kill → restart) and arms a Dart timer; a second
+`set_timer` replaces the current clock. When it fires, the announcement
+enters `BrainSession.handleCue` on the **same** serialized conversation
+queue as spoken turns — never a second LiteRT session. Due timers restore
+after brain warm-up. `cancel_timer`, `pause_timer`, and `resume_timer`
+drop, freeze, or continue the pending countdown (the OLED stays on the
+last `HH:MM:SS` while paused).
 
 ## M5 in one paragraph
 

@@ -228,15 +228,37 @@ void main() {
       expect(matchText('freeze the timer'), isNull);
     });
 
-    test('cancel the tea timer keeps the label', () {
+    test('cancel the tea timer is unlabeled', () {
       final call = matchText('cancel the tea timer')!.calls.single;
       expect(call.name, 'cancel_timer');
-      expect(call.arguments['label'], 'tea');
+      expect(call.arguments.containsKey('label'), isFalse);
+      expect(call.transcriptLine, 'cancel_timer()');
     });
 
-    test('pause the tea timer', () {
-      expect(matchText('pause the tea timer')!.calls.single.arguments['label'],
-          'tea');
+    test('discourse prefixes do not become cancel labels', () {
+      for (final utterance in [
+        'You know what, cancel the timer.',
+        "I'll cancel the timer",
+        'Uh, cancel the timer',
+      ]) {
+        final hit = matchText(utterance);
+        expect(hit, isNotNull, reason: utterance);
+        expect(hit!.reason, 'cancel-timer', reason: utterance);
+        expect(hit.calls.single.transcriptLine, 'cancel_timer()');
+        expect(hit.calls.single.arguments.containsKey('label'), isFalse);
+      }
+    });
+
+    test('discourse prefixes do not become pause or resume labels', () {
+      expect(matchText('Uh, pause the timer')!.calls.single.transcriptLine,
+          'pause_timer()');
+      expect(matchText("I'll resume the timer")!.calls.single.transcriptLine,
+          'resume_timer()');
+    });
+
+    test('pause the tea timer is unlabeled', () {
+      expect(matchText('pause the tea timer')!.calls.single.transcriptLine,
+          'pause_timer()');
     });
 
     test('resume the timer', () {

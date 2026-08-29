@@ -36,9 +36,10 @@ final List<Tool> kBotTools = [
   Tool(
     name: 'set_timer',
     description:
-        'Start a countdown on the phone. The phone confirms with a yes '
-        'expression, and the robot will express alarm when it fires. '
-        'Pending timers survive a service restart.',
+        'Start a countdown on the phone. If one is already pending, this '
+        'replaces it — there is only ever one clock. The phone confirms '
+        'with a yes expression, and the robot will express alarm when it '
+        'fires. The timer survives a service restart.',
     parameters: {
       'type': 'object',
       'properties': {
@@ -66,47 +67,31 @@ final List<Tool> kBotTools = [
   Tool(
     name: 'cancel_timer',
     description:
-        'Cancel a pending phone timer so it will not fire. Omit label '
-        'to cancel the soonest one. The phone confirms with a yes '
-        'expression, or no if nothing matches.',
+        'Cancel the pending phone timer so it will not fire. The phone '
+        'confirms with a yes expression, or no if none is pending.',
     parameters: {
       'type': 'object',
-      'properties': {
-        'label': {
-          'type': 'string',
-          'description': 'Which timer to cancel, if more than one',
-        },
-      },
+      'properties': <String, dynamic>{},
     },
   ),
   Tool(
     name: 'pause_timer',
     description:
-        'Pause a running phone timer. Remaining time freezes on the '
-        'face until resume_timer. Omit label to pause the soonest one.',
+        'Pause the pending phone timer. Remaining time freezes on the '
+        'face until resume_timer.',
     parameters: {
       'type': 'object',
-      'properties': {
-        'label': {
-          'type': 'string',
-          'description': 'Which timer to pause, if more than one',
-        },
-      },
+      'properties': <String, dynamic>{},
     },
   ),
   Tool(
     name: 'resume_timer',
     description:
-        'Resume a paused phone timer. Omit label to resume the paused '
-        'one. The phone confirms with a yes expression.',
+        'Resume the paused phone timer. The phone confirms with a yes '
+        'expression, or no if none is pending.',
     parameters: {
       'type': 'object',
-      'properties': {
-        'label': {
-          'type': 'string',
-          'description': 'Which timer to resume, if more than one',
-        },
-      },
+      'properties': <String, dynamic>{},
     },
   ),
   Tool(
@@ -166,15 +151,7 @@ List<ToolCall> parseLeakedToolCalls(String text) {
         lower.startsWith('pause_timer') ||
         lower.startsWith('resume_timer')) {
       final name = (match.group(4) ?? '').toLowerCase();
-      var label = (match.group(5) ?? '').trim();
-      if (label.length >= 2 &&
-          ((label.startsWith('"') && label.endsWith('"')) ||
-              (label.startsWith("'") && label.endsWith("'")))) {
-        label = label.substring(1, label.length - 1).trim();
-      }
-      calls.add(ToolCall(name, {
-        if (label.isNotEmpty) 'label': label,
-      }));
+      calls.add(ToolCall(name, {}));
     } else {
       calls.add(const ToolCall('get_battery', {}));
     }
