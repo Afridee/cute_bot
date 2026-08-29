@@ -215,17 +215,17 @@ satisfied and the wizard continues to voice enroll.
 out wrong. Say these lines so pause and timers still work. Use the robot
 or Bot Simulator. Skip if the bot isn’t here.
 
-Zipformer (the on-device ASR) mangles some speakers so “Pause the timer”
-lands as `WAS THE TEMPER`. This step records those substitutions and
-overlays them on the fast-intent matcher. No Gemma. Alignment is
-deterministic. The overlay only keeps substitutions seen in at least
-two takes.
+The on-device ASR (Whisper base.en) still mangles some speakers so
+“Pause the timer” lands as `WAS THE TEMPER`. This step records those
+substitutions and overlays them on the fast-intent matcher. No Gemma.
+Alignment is deterministic. The overlay only keeps substitutions seen
+in at least two takes.
 
 **UI:** 11 prompted lines, 5 successful transcripts each (empty / silence
 does not count). The line to say is the display type (one break). Line
 counter `03 / 11` as a Space Mono label; takes as a 5-segment bar. Last
 ASR line under HEARD in data type. Skip this line after 3 successes.
-Speak into the bot or Bot Simulator — same Zipformer as live commands.
+Speak into the bot or Bot Simulator — same on-device ASR as live commands.
 No phone primary: speaking is hold-to-talk on the robot. If nothing is
 connected, status is `[WAITING]`. While receiving: `[LISTENING]`. Silence:
 `[MISSED]`.

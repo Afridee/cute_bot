@@ -25,7 +25,7 @@ Gemma). **M5** is TTS to the bot speaker plus `persona.dart`.
 | `lib/shared/log.dart` | Single logging channel with levels. `adb logcat | grep CuteBot`. |
 | `lib/bot_simulator/` | Peripheral (GATT server) mode: a second Android phone standing in for the ESP32. |
 | `lib/companion/` | Central mode — the actual app. `bot_link.dart` (scan / auto-connect / MTU 517 / reconnect backoff / prioritized writes); since M2 the UI is a thin client over the foreground service. |
-| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the `BotBrain` interface, including `respondToCue` for timer fires), `fake_brain.dart`, `gemma_brain.dart`, `hybrid_brain.dart` + `fast_intent.dart` (NLP fast path) + `fast_intent_overlay.dart` / `fast_intent_enroll.dart` (per-user Zipformer aliases, no Gemma), `sherpa_clip_asr.dart` (on-device ASR so spoken commands can hit that path), `brain_session.dart` (serialized conversation queue), `transcript.dart`, `pcm16.dart` / `latency_trace.dart` / `bot_tools.dart`. |
+| `lib/companion/brain/` | The LLM boundary: `bot_brain.dart` (the `BotBrain` interface, including `respondToCue` for timer fires), `fake_brain.dart`, `gemma_brain.dart`, `hybrid_brain.dart` + `fast_intent.dart` (NLP fast path) + `fast_intent_overlay.dart` / `fast_intent_enroll.dart` (per-user ASR aliases, no Gemma), `sherpa_clip_asr.dart` (on-device ASR so spoken commands can hit that path), `brain_session.dart` (serialized conversation queue), `transcript.dart`, `pcm16.dart` / `latency_trace.dart` / `bot_tools.dart`. |
 | `lib/companion/persona.dart` | M5: system prompt + few-shots. The only place personality lives. |
 | `lib/companion/voice/` | M5: `Voice` interface, `FlutterTtsVoice` (`synthesizeToFile` → WAV → 16 kHz PCM), `FakeVoice`, sentence splitter, `ReplySpeaker` (sentence-by-sentence ADPCM over BLE). |
 | `lib/companion/service/` | Foreground service plus `bot_body.dart` (tool dispatch), `timer_store.dart` (pending timers on the same KV store as the transcript), `fast_intent_store.dart` (per-user ASR overlay), `service_ipc.dart`, `task_storage.dart`, `notification_text.dart`. |
@@ -73,9 +73,9 @@ Gemma). **M5** is TTS to the bot speaker plus `persona.dart`.
 - `flutter_tts` 4.2.5 — M5. Named in the brief. `synthesizeToFile` (not
   `speak`) so PCM can be resampled to 16 kHz, ADPCM-encoded, and written
   to the bot speaker. The phone speaker stays silent.
-- `sherpa_onnx` 1.13.6 — on-device ASR (zipformer-small English, CPU) so
-  spoken clips become text for the NLP fast path. Gemma still takes native
-  audio when the matcher misses.
+- `sherpa_onnx` 1.13.6 — on-device ASR (Whisper base.en, CPU, ~161 MB)
+  so spoken clips become text for the NLP fast path. Gemma still takes
+  native audio when the matcher misses.
 
 ## Protocol summary (v1)
 

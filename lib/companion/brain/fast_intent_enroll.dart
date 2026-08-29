@@ -1,4 +1,4 @@
-/// Deterministic ASR enrollment: align prompt tokens to Zipformer
+/// Deterministic ASR enrollment: align prompt tokens to Whisper
 /// transcripts and merge substitutions into a [FastIntentOverlay].
 ///
 /// No Gemma. A phrase, verb alias, or noun alias is stored only if it
